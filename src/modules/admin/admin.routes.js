@@ -1,20 +1,46 @@
 const express = require('express');
-const { login, verifyLoginOtp, listUsers, setUserActive, listDatasets, deleteDataset, getStats } = require('./admin.controller');
+const {
+  login, verifyLoginOtp,
+  listUsers, deleteUser,
+  listDatasets, deleteDataset,
+  listRepositories, createRepository, deleteRepository, resyncRepository,
+  getModerationQueue, approveDataset, rejectDataset,
+  getAnalytics, getDashboard, getAuditLog,
+} = require('./admin.controller');
 const { requireAuth, requireAdmin } = require('../auth/auth.middleware');
 const { otpVerifyLimiter } = require('../../middleware/rateLimiter');
 
 const router = express.Router();
 
+// ── Public auth routes ───────────────────────────────────────────────────────
 router.post('/login', login);
 router.post('/verify-login-otp', otpVerifyLimiter, verifyLoginOtp);
 
-// everything below requires a valid access token AND role=admin
+// ── All routes below require a valid admin access token ──────────────────────
 router.use(requireAuth, requireAdmin);
 
-router.get('/stats', getStats);
+// Users
 router.get('/users', listUsers);
-router.patch('/users/:userId/active', setUserActive);
+router.delete('/users/:id', deleteUser);             // §11.2
+
+// Datasets (pre-existing)
 router.get('/datasets', listDatasets);
 router.delete('/datasets/:datasetId', deleteDataset);
+
+// Repositories (§11.1)
+router.get('/repositories', listRepositories);
+router.post('/repositories', createRepository);
+router.delete('/repositories/:id', deleteRepository);
+router.post('/repositories/:id/resync', resyncRepository);
+
+// Moderation queue (§11.3)
+router.get('/moderation/queue', getModerationQueue);
+router.post('/moderation/:id/approve', approveDataset);
+router.post('/moderation/:id/reject', rejectDataset);
+
+// Analytics, Dashboard, Audit log (§11.5, §11.8, §11.6)
+router.get('/analytics', getAnalytics);
+router.get('/dashboard', getDashboard);
+router.get('/audit-log', getAuditLog);
 
 module.exports = router;

@@ -157,7 +157,22 @@ const logout = asyncHandler(async (req, res) => {
 });
 
 // §10.7 — GET /users/me (reachable pre-onboarding)
+// §11.0 — branch on role so admin tokens don't 404
 const getMe = asyncHandler(async (req, res) => {
+  // Admin session — query Admin collection, return admin-shaped profile
+  if (req.user.role === 'admin') {
+    const Admin = require('../admin/admin.model');
+    const admin = await Admin.findById(req.user.id).lean();
+    if (!admin) throw new ApiError(404, 'Admin not found.');
+    return new ApiResponse(200, {
+      id: admin._id,
+      name: admin.name,
+      email: admin.email,
+      isAdmin: true,
+    }).send(res);
+  }
+
+  // Regular user session
   const user = await User.findById(req.user.id).lean();
   if (!user) throw new ApiError(404, 'User not found.');
 
@@ -179,6 +194,7 @@ const getMe = asyncHandler(async (req, res) => {
     isOnboarded: user.isOnboarded,
     isLegacyUser: user.isLegacyUser,
     notificationsEnabled: user.notificationsEnabled,
+    isAdmin: false,
     socialLinks,
   }).send(res);
 });
