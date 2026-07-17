@@ -4,7 +4,6 @@ const {
   listUsers, deleteUser,
   listDatasets, deleteDataset,
   listRepositories, createRepository, deleteRepository, resyncRepository,
-  getModerationQueue, approveDataset, rejectDataset,
   getAnalytics, getDashboard, getAuditLog,
 } = require('./admin.controller');
 const { requireAuth, requireAdmin } = require('../auth/auth.middleware');
@@ -33,10 +32,6 @@ router.post('/repositories', createRepository);
 router.delete('/repositories/:id', deleteRepository);
 router.post('/repositories/:id/resync', resyncRepository);
 
-// Moderation queue (§11.3)
-router.get('/moderation/queue', getModerationQueue);
-router.post('/moderation/:id/approve', approveDataset);
-router.post('/moderation/:id/reject', rejectDataset);
 
 // Analytics, Dashboard, Audit log (§11.5, §11.8, §11.6)
 router.get('/analytics', getAnalytics);

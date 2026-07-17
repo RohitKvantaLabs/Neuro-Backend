@@ -13,7 +13,6 @@ const { signAccessToken, signRefreshToken, REFRESH_COOKIE_NAME, REFRESH_COOKIE_O
 const { logAdminAction } = require('../../utils/auditLog.util');
 const AuditLog = require('./auditLog.model');
 const Repository = require('./repository.model');
-const PendingDataset = require('./pendingDataset.model');
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -158,62 +157,6 @@ const resyncRepository = asyncHandler(async (req, res) => {
   return new ApiResponse(200, repo, 'Resync initiated.').send(res);
 });
 
-// ─── Moderation (§11.3) ───────────────────────────────────────────────────────
-
-const getModerationQueue = asyncHandler(async (req, res) => {
-  const queue = await PendingDataset.find({ status: 'pending' }).sort({ discovered_at: -1 });
-  return new ApiResponse(200, queue).send(res);
-});
-
-const approveDataset = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const pending = await PendingDataset.findById(id);
-  if (!pending) throw new ApiError(404, 'Pending dataset not found.');
-
-  // Upsert into the live Dataset collection on (source, source_id)
-  const datasetFields = pending.toObject();
-  // Strip fields that are moderation-specific and not on Dataset schema
-  delete datasetFields._id;
-  delete datasetFields.source_query;
-  delete datasetFields.discovered_at;
-  delete datasetFields.status;
-  delete datasetFields.rejectionReason;
-  delete datasetFields.__v;
-  delete datasetFields.createdAt;
-  delete datasetFields.updatedAt;
-
-  await Dataset.findOneAndUpdate(
-    { source: pending.source, source_id: pending.source_id },
-    { $set: datasetFields },
-    { upsert: true, new: true }
-  );
-
-  await PendingDataset.findByIdAndDelete(id);
-
-  logAdminAction(req.user.id, 'moderation.approve', 'dataset', id, {
-    source: pending.source,
-    source_id: pending.source_id,
-  });
-
-  return new ApiResponse(200, null, 'Dataset approved and published.').send(res);
-});
-
-const rejectDataset = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { reason } = req.body;
-
-  const pending = await PendingDataset.findByIdAndUpdate(
-    id,
-    { status: 'rejected', rejectionReason: reason ?? null },
-    { new: true }
-  );
-  if (!pending) throw new ApiError(404, 'Pending dataset not found.');
-
-  logAdminAction(req.user.id, 'moderation.reject', 'dataset', id, { reason: reason ?? null });
-
-  return new ApiResponse(200, null, 'Dataset rejected.').send(res);
-});
-
 // ─── Analytics (§11.5) ────────────────────────────────────────────────────────
 
 const getAnalytics = asyncHandler(async (req, res) => {
@@ -249,14 +192,14 @@ const getAnalytics = asyncHandler(async (req, res) => {
 // ─── Dashboard (§11.8) ────────────────────────────────────────────────────────
 
 const getDashboard = asyncHandler(async (req, res) => {
-  const [totalUsers, pendingModeration, repositories, recentAudit] = await Promise.all([
+  const [totalUsers, repositories, recentAudit] = await Promise.all([
     User.countDocuments(),
-    PendingDataset.countDocuments({ status: 'pending' }),
     Repository.find().sort({ createdAt: -1 }),
     AuditLog.find().sort({ createdAt: -1 }).limit(10),
   ]);
 
-  return new ApiResponse(200, { totalUsers, pendingModeration, repositories, recentAudit }).send(res);
+  // ponytail: no moderation queue — Python writes directly to datasets; QC via cron + listDatasets/deleteDataset
+  return new ApiResponse(200, { totalUsers, repositories, recentAudit }).send(res);
 });
 
 // ─── Audit Log (§11.6) ────────────────────────────────────────────────────────
@@ -272,6 +215,5 @@ module.exports = {
   listUsers, deleteUser,
   listDatasets, deleteDataset,
   listRepositories, createRepository, deleteRepository, resyncRepository,
-  getModerationQueue, approveDataset, rejectDataset,
   getAnalytics, getDashboard, getAuditLog,
 };
