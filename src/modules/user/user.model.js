@@ -17,6 +17,7 @@ const userSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true },
     isEmailVerified: { type: Boolean, default: false },
     phone: { type: String, default: null },
+    countryCode: { type: String, default: null }, // E.164 prefix e.g. "+91" — stored separately from digits
 
     // Google Sign-In
     googleId: { type: String, sparse: true, unique: true },

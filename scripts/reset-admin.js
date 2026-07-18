@@ -6,12 +6,18 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const env = require('../src/config/env.config');
 const Admin = require('../src/modules/admin/admin.model');
+const { isValidPassword, PASSWORD_MESSAGE } = require('../src/utils/passwordPolicy');
 
 async function resetAdmin() {
   const [, , email, newPassword] = process.argv;
 
   if (!email || !newPassword) {
     console.error('Usage: node scripts/reset-admin.js <email> <newPassword>');
+    process.exit(1);
+  }
+
+  if (!isValidPassword(newPassword)) {
+    console.error(`New password does not meet policy: ${PASSWORD_MESSAGE}`);
     process.exit(1);
   }
 

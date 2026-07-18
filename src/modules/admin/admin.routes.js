@@ -7,12 +7,12 @@ const {
   getAnalytics, getDashboard, getAuditLog,
 } = require('./admin.controller');
 const { requireAuth, requireAdmin } = require('../auth/auth.middleware');
-const { otpVerifyLimiter } = require('../../middleware/rateLimiter');
+const { otpVerifyLimiter, loginLimiter } = require('../../middleware/rateLimiter');
 
 const router = express.Router();
 
 // ── Public auth routes ───────────────────────────────────────────────────────
-router.post('/login', login);
+router.post('/login', loginLimiter, login);
 router.post('/verify-login-otp', otpVerifyLimiter, verifyLoginOtp);
 
 // ── All routes below require a valid admin access token ──────────────────────

@@ -6,6 +6,7 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const env = require('../src/config/env.config');
 const Admin = require('../src/modules/admin/admin.model');
+const { isValidPassword, PASSWORD_MESSAGE } = require('../src/utils/passwordPolicy');
 
 async function seedAdmin() {
   const email = process.env.SEED_ADMIN_EMAIL;
@@ -13,6 +14,11 @@ async function seedAdmin() {
 
   if (!email || !password) {
     console.error('Set SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD in .env before running this script.');
+    process.exit(1);
+  }
+
+  if (!isValidPassword(password)) {
+    console.error(`SEED_ADMIN_PASSWORD does not meet policy: ${PASSWORD_MESSAGE}`);
     process.exit(1);
   }
 

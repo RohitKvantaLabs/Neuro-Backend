@@ -50,4 +50,14 @@ const passwordResetLimiter = rateLimit({
   message: { success: false, message: 'Too many password-reset requests. Try again later.' },
 });
 
-module.exports = { generalLimiter, searchLimiter, otpVerifyLimiter, resendOtpLimiter, passwordResetLimiter };
+// Login — keyed by email to prevent credential-stuffing across IPs (5 attempts / 15 min)
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  keyGenerator: (req) => req.body?.email || ipKeyGenerator(req),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many login attempts. Try again in 15 minutes.' },
+});
+
+module.exports = { generalLimiter, searchLimiter, otpVerifyLimiter, resendOtpLimiter, passwordResetLimiter, loginLimiter };

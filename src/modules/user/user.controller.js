@@ -62,7 +62,8 @@ const register = asyncHandler(async (req, res) => {
   const existing = await User.findOne({ email: value.email });
   if (existing) throw new ApiError(409, 'An account with this email already exists.');
 
-  const phoneCount = await User.countDocuments({ phone: value.phone });
+  // Phone cap keyed on countryCode+phone combined to allow same digits across different country codes
+  const phoneCount = await User.countDocuments({ countryCode: value.countryCode, phone: value.phone });
   if (phoneCount >= 2) throw new ApiError(409, 'This phone number is already associated with the maximum number of accounts.');
 
   const passwordHash = await User.hashPassword(value.password);
@@ -70,6 +71,7 @@ const register = asyncHandler(async (req, res) => {
     name: value.name,
     email: value.email,
     passwordHash,
+    countryCode: value.countryCode,
     phone: value.phone,
     authProvider: 'local',
     isEmailVerified: false,
@@ -188,6 +190,7 @@ const getMe = asyncHandler(async (req, res) => {
     id: user._id,
     name: user.name,
     email: user.email,
+    countryCode: user.countryCode,
     phone: user.phone,
     role: user.role,
     institute: user.institute,
@@ -207,9 +210,14 @@ const updateMe = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user.id).select('+passwordHash');
   if (!user) throw new ApiError(404, 'User not found.');
 
-  if (value.phone && value.phone !== user.phone) {
-    const phoneCount = await User.countDocuments({ phone: value.phone, _id: { $ne: user._id } });
+  if (value.phone && (value.countryCode !== user.countryCode || value.phone !== user.phone)) {
+    const phoneCount = await User.countDocuments({
+      countryCode: value.countryCode ?? user.countryCode,
+      phone: value.phone,
+      _id: { $ne: user._id },
+    });
     if (phoneCount >= 2) throw new ApiError(409, 'This phone number is already associated with the maximum number of accounts.');
+    if (value.countryCode !== undefined) user.countryCode = value.countryCode;
     user.phone = value.phone;
   }
 
@@ -242,11 +250,13 @@ const completeOnboarding = asyncHandler(async (req, res) => {
   // phone: only required if user has none (Google accounts); local already have it
   if (!user.phone) {
     if (!value.phone) throw new ApiError(400, 'Phone number is required to complete sign-in.');
-    const phoneCount = await User.countDocuments({ phone: value.phone });
+    if (!value.countryCode) throw new ApiError(400, 'Country code is required to complete sign-in.');
+    const phoneCount = await User.countDocuments({ countryCode: value.countryCode, phone: value.phone });
     if (phoneCount >= 2) throw new ApiError(409, 'This phone number is already associated with the maximum number of accounts.');
+    user.countryCode = value.countryCode;
     user.phone = value.phone;
   }
-  // If user already has phone, any phone sent is silently ignored (locked at this step by design)
+  // If user already has phone, any phone/countryCode sent is silently ignored (locked at this step by design)
 
   user.name = value.name;
   user.role = value.role;

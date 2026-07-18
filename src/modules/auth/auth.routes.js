@@ -5,13 +5,13 @@ const {
   completeOnboarding, googleLogin,
 } = require('../user/user.controller');
 const { requireAuth } = require('./auth.middleware');
-const { otpVerifyLimiter, resendOtpLimiter, passwordResetLimiter } = require('../../middleware/rateLimiter');
+const { otpVerifyLimiter, resendOtpLimiter, passwordResetLimiter, loginLimiter } = require('../../middleware/rateLimiter');
 
 const router = express.Router();
 
 // Local auth
 router.post('/register', register);
-router.post('/login', login);
+router.post('/login', loginLimiter, login);
 router.post('/refresh', refresh);
 router.post('/logout', logout);
 
