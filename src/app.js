@@ -15,7 +15,15 @@ const app = express();
 
 // 1. Security headers first (no body needed)
 app.use(helmet());
-app.use(cors({ origin: env.frontendOrigin, credentials: true }));
+app.use(cors({
+  origin(origin, callback) {
+    // Requests without an Origin header (health checks and server-to-server calls)
+    // are safe to allow; browser requests must match an explicitly configured UI origin.
+    if (!origin || env.frontendOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS origin not allowed: ${origin}`));
+  },
+  credentials: true,
+}));
 
 // 2. Parsers
 app.use(express.json());

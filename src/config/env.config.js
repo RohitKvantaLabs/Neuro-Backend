@@ -42,7 +42,10 @@ module.exports = {
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   },
 
-  frontendOrigin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173',
+  frontendOrigins: (process.env.FRONTEND_ORIGIN || 'http://localhost:8080')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean),
 
   pythonAgent: {
     baseUrl: process.env.PYTHON_AGENT_BASE_URL,
