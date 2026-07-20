@@ -1,6 +1,4 @@
 const rateLimit = require('express-rate-limit');
-// ponytail: ipKeyGenerator required by express-rate-limit v8+ when keyGenerator may fall back to IP
-const { ipKeyGenerator } = rateLimit;
 
 // General API traffic
 const generalLimiter = rateLimit({
@@ -24,7 +22,8 @@ const searchLimiter = rateLimit({
 const otpVerifyLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
-  keyGenerator: (req) => req.body?.email || ipKeyGenerator(req),
+  keyGenerator: (req) => req.body?.email || req.ip,
+  validate: { keyGeneratorIpFallback: false },
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many OTP attempts. Try again in 15 minutes.' },
@@ -34,7 +33,8 @@ const otpVerifyLimiter = rateLimit({
 const resendOtpLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 3,
-  keyGenerator: (req) => req.body?.email || ipKeyGenerator(req),
+  keyGenerator: (req) => req.body?.email || req.ip,
+  validate: { keyGeneratorIpFallback: false },
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many resend requests. Try again in an hour.' },
@@ -44,7 +44,8 @@ const resendOtpLimiter = rateLimit({
 const passwordResetLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
-  keyGenerator: (req) => req.body?.email || ipKeyGenerator(req),
+  keyGenerator: (req) => req.body?.email || req.ip,
+  validate: { keyGeneratorIpFallback: false },
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many password-reset requests. Try again later.' },
@@ -54,7 +55,8 @@ const passwordResetLimiter = rateLimit({
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
-  keyGenerator: (req) => req.body?.email || ipKeyGenerator(req),
+  keyGenerator: (req) => req.body?.email || req.ip,
+  validate: { keyGeneratorIpFallback: false },
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many login attempts. Try again in 15 minutes.' },

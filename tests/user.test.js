@@ -68,7 +68,7 @@ describe('Test 1 — Local register + verify-otp issues full token with isOnboar
 
     const regRes = await request(app)
       .post('/api/v1/auth/register')
-      .send({ name: 'Alice', email, password: 'Password1!', confirmPassword: 'Password1!', phone: '+14155550001' });
+      .send({ name: 'Alice', email, password: 'Password1!', confirmPassword: 'Password1!', countryCode: '+1', phone: '4155550001' });
     expect(regRes.status).toBe(201);
 
     const user = await User.findOne({ email }).select('+otp +otpExpires +otpPurpose +passwordHash');
@@ -187,26 +187,26 @@ describe('Test 5 — completeOnboarding for Google user (phone required)', () =>
     const res = await request(app)
       .post('/api/v1/auth/complete-onboarding')
       .set('Authorization', `Bearer ${token}`)
-      .send({ name: 'Eve G.', role: 'student', institute: 'Stanford', phone: '+14155550005' });
+      .send({ name: 'Eve G.', role: 'student', institute: 'Stanford', countryCode: '+1', phone: '4155550005' });
 
     expect(res.status).toBe(200);
     expect(res.body.data.accessToken).toBeDefined();
 
     const updated = await User.findById(user._id);
     expect(updated.isOnboarded).toBe(true);
-    expect(updated.phone).toBe('+14155550005');
+    expect(updated.phone).toBe('4155550005');
     expect(updated.institute).toBe('Stanford');
   });
 
   it('rejects when phone cap (2 accounts) is already reached', async () => {
-    const phone = '+14155550099';
+    const phone = '4155550099';
     await User.create({
       name: 'U1', email: 'u1@example.com', passwordHash: await User.hashPassword('P1!'),
-      phone, authProvider: 'local', isEmailVerified: true, isOnboarded: true,
+      countryCode: '+1', phone, authProvider: 'local', isEmailVerified: true, isOnboarded: true,
     });
     await User.create({
       name: 'U2', email: 'u2@example.com', passwordHash: await User.hashPassword('P1!'),
-      phone, authProvider: 'local', isEmailVerified: true, isOnboarded: true,
+      countryCode: '+1', phone, authProvider: 'local', isEmailVerified: true, isOnboarded: true,
     });
 
     const user = await User.create({
@@ -218,7 +218,7 @@ describe('Test 5 — completeOnboarding for Google user (phone required)', () =>
     const res = await request(app)
       .post('/api/v1/auth/complete-onboarding')
       .set('Authorization', `Bearer ${token}`)
-      .send({ name: 'Eve 2', role: 'student', institute: 'Harvard', phone });
+      .send({ name: 'Eve 2', role: 'student', institute: 'Harvard', countryCode: '+1', phone });
 
     expect(res.status).toBe(409);
   });

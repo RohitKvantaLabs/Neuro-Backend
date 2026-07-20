@@ -21,7 +21,7 @@ const REFRESH_COOKIE_NAME = 'refreshToken';
 const REFRESH_COOKIE_OPTIONS = {
   httpOnly: true,
   secure: env.nodeEnv === 'production',
-  sameSite: 'strict',
+  sameSite: env.nodeEnv === 'production' ? 'none' : 'lax',
   maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days - keep in sync with JWT_REFRESH_EXPIRES_IN
   path: '/api/v1/auth', // only sent to auth endpoints, not every request
 };

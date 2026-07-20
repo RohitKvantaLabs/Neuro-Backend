@@ -42,9 +42,9 @@ module.exports = {
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   },
 
-  frontendOrigins: (process.env.FRONTEND_ORIGIN || 'https://neuro-frontend-two.vercel.app/')
+  frontendOrigins: (process.env.FRONTEND_ORIGIN || 'https://neuro-frontend-two.vercel.app')
     .split(',')
-    .map((origin) => origin.trim())
+    .map((origin) => origin.trim().replace(/\/$/, ''))
     .filter(Boolean),
 
   pythonAgent: {
