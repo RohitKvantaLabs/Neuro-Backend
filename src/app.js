@@ -5,6 +5,7 @@ const cookieParser = require('cookie-parser');
 const mongoSanitize = require('express-mongo-sanitize');
 
 const env = require('./config/env.config');
+const connectDB = require('./config/db.config');
 const requestLogger = require('./middleware/requestLogger');
 const { generalLimiter } = require('./middleware/rateLimiter');
 const notFound = require('./middleware/notFound');
@@ -37,6 +38,16 @@ app.use((req, res, next) => { mongoSanitize.sanitize(req.body); next(); });
 // 4. Logging + rate limiting
 app.use(requestLogger);
 app.use(generalLimiter);
+
+// 5. Database connection middleware (ensures MongoDB is connected in Vercel serverless functions)
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
 
 app.use('/api/v1', apiRouter);
 
