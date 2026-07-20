@@ -38,7 +38,11 @@ async function issueAndSendOtp(user, purpose, expiryMinutes) {
   user.otpExpires = otpExpiryDate(expiryMinutes);
   user.otpPurpose = purpose;
   await user.save();
-  await sendOtpEmail(user.email, otp, purpose);
+  try {
+    await sendOtpEmail(user.email, otp, purpose);
+  } catch (err) {
+    throw new ApiError(503, `Failed to send verification email: ${err.message}`);
+  }
 }
 
 // §10.2: Issues a full access + refresh token pair. No scoped tokens.
