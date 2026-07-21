@@ -54,32 +54,31 @@ const search = asyncHandler(async (req, res) => {
     return new ApiResponse(200, { source: 'cache', results: cachedResults }, 'Results found.').send(res);
   }
 
-  // Cache miss: block on Python's fallback search.
-  // Python writes any new datasets into Mongo as part of that same call.
-  // Re-run Mongo search after the call resolves to pick them up.
-  let agentReceipt = null;
+  // Cache miss: return Python's verified records directly. A second Mongo
+  // query could exclude newly discovered data that is not an exact filter fit.
+  let fallbackDatasets = [];
   try {
-    agentReceipt = await runFallbackSearch({ query, filters });
+    const agentResult = await runFallbackSearch({ query, filters });
+    fallbackDatasets = Array.isArray(agentResult?.datasets) ? agentResult.datasets : [];
   } catch (err) {
     logger.error(`Fallback agent search failed for query="${query}": ${err.message}`);
+    throw new ApiError(502, 'Dataset fallback search could not be completed. Please try again.');
   }
 
   // Python already wrote any new matches into Mongo by the time its
   // response returns — re-run the same search to pick them up.
-  const freshResults = agentReceipt ? await searchDatasets(filters) : [];
-
   await QueryLog.create({
     userId: req.user?.id || null,
     rawQuery: query,
     filters,
     resultSource: 'fallback',
-    resultCount: freshResults.length,
+    resultCount: fallbackDatasets.length,
   });
 
   return new ApiResponse(
     200,
-    { source: 'agent', results: freshResults },
-    freshResults.length > 0 ? 'Results found via live search.' : 'No datasets found for this query.'
+    { source: 'agent', results: fallbackDatasets },
+    fallbackDatasets.length > 0 ? 'Results found via live search.' : 'No datasets found for this query.'
   ).send(res);
 });
 

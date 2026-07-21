@@ -1,4 +1,5 @@
 const axios = require('axios');
+const crypto = require('crypto');
 const env = require('../../config/env.config');
 const logger = require('../../utils/logger');
 
@@ -55,7 +56,11 @@ async function parseQuery(query) {
  * Throws on HTTP/network failure — let the controller handle it.
  */
 async function runFallbackSearch({ query, filters }) {
-  const { data } = await client.post('/agents/fallback-search', { query, filters });
+  const { data } = await client.post('/agents/fallback-search', {
+    query_id: crypto.randomUUID(),
+    query,
+    filters,
+  });
   logger.info(`Fallback agent search completed for query="${query}": datasets_found=${data?.datasets_found ?? 0}, published=${data?.published}`);
   return data; // { query_id, datasets_found, published } — no dataset array
 }
