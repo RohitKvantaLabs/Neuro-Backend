@@ -5,5 +5,5 @@ coverage/
 .DS_Store
 CLAUDE.md
 agent_implementation.md
-dataset_schema.json
+dataset_schema.json 
 test/
