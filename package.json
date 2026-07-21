@@ -6,12 +6,13 @@
   "directories": {
     "test": "tests"
   },
-  "scripts": {
-    "test": "jest --runInBand",
-    "start": "nodemon src/server.js",
-    "seed:admin": "node scripts/seedAdmin.js",
-    "reset:admin": "node scripts/reset-admin.js"
-  },
+"scripts": {
+  "dev": "nodemon src/server.js",
+  "start": "node src/server.js",
+  "test": "jest --runInBand",
+  "seed:admin": "node scripts/seedAdmin.js",
+  "reset:admin": "node scripts/reset-admin.js"
+},
   "keywords": [],
   "author": "",
   "license": "ISC",
