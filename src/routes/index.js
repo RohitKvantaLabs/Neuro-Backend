@@ -5,7 +5,6 @@ const userRoutes = require('../modules/user/user.route');
 const adminRoutes = require('../modules/admin/admin.routes');
 const datasetRoutes = require('../modules/dataset/dataset.routes');
 const queryLogRoutes = require('../modules/queryLog/queryLog.routes');
-const sseRoutes = require('../modules/realtime/sse.routes');
 const { requireAuth } = require('../modules/auth/auth.middleware');
 const { requireOnboardingComplete } = require('../middleware/requireOnboardingComplete');
 
@@ -21,6 +20,6 @@ router.use('/admin', adminRoutes);
 router.use('/datasets', requireAuth, requireOnboardingComplete, datasetRoutes);
 
 router.use('/query-logs', queryLogRoutes);
-router.use('/stream', sseRoutes);
+// ponytail: /stream SSE route unmounted — replaced by blocking search flow
 
 module.exports = router;

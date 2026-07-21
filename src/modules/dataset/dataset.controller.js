@@ -1,9 +1,8 @@
-const crypto = require('crypto');
 const ApiError = require('../../utils/ApiError');
 const ApiResponse = require('../../utils/ApiResponse');
 const asyncHandler = require('../../utils/asyncHandler');
 const logger = require('../../utils/logger');
-const { parseQuery, triggerFallbackSearch } = require('../agent/agent.client');
+const { parseQuery, runFallbackSearch } = require('../agent/agent.client');
 const { searchDatasets } = require('./dataset.service');
 const QueryLog = require('../queryLog/queryLog.model');
 const SearchHistory = require('../user/searchHistory.model');
@@ -11,14 +10,16 @@ const SearchHistory = require('../user/searchHistory.model');
 /**
  * POST /datasets/search
  *
- * Flow (matches NODE_INTEGRATION_CONTRACT.md):
+ * Flow:
  *   1. Blocking call to Python's parse-query -> structured filters
  *   2. Query Mongo with those filters
  *   3. Cache hit -> return results directly, done
- *   4. Cache miss -> fire off fallback-search (don't await it), return a
- *      queryId immediately so the frontend can open the SSE stream
+ *   4. Cache miss -> blocking call to Python's fallback-search
+ *      Python writes any new matches into Mongo during that call.
+ *      Re-run the same Mongo search to pick them up; return 200.
  *
  * §10.5: Fire-and-forget SearchHistory write for authenticated users.
+ * Node stays read-only for the datasets collection — Python owns writes.
  */
 const search = asyncHandler(async (req, res) => {
   const { query } = req.body;
@@ -53,24 +54,32 @@ const search = asyncHandler(async (req, res) => {
     return new ApiResponse(200, { source: 'cache', results: cachedResults }, 'Results found.').send(res);
   }
 
-  // Cache miss: hand off to Python. Deliberately NOT awaited - the
-  // frontend gets a queryId now and opens an SSE connection; the actual
-  // result arrives asynchronously via Redis (see realtime/redis.subscriber.js).
-  const queryId = crypto.randomUUID();
-  triggerFallbackSearch({ queryId, query, filters }); // fire-and-forget on purpose
+  // Cache miss: block on Python's fallback search.
+  // Python writes any new datasets into Mongo as part of that same call.
+  // Re-run Mongo search after the call resolves to pick them up.
+  let agentReceipt = null;
+  try {
+    agentReceipt = await runFallbackSearch({ query, filters });
+  } catch (err) {
+    logger.error(`Fallback agent search failed for query="${query}": ${err.message}`);
+  }
+
+  // Python already wrote any new matches into Mongo by the time its
+  // response returns — re-run the same search to pick them up.
+  const freshResults = agentReceipt ? await searchDatasets(filters) : [];
 
   await QueryLog.create({
     userId: req.user?.id || null,
     rawQuery: query,
     filters,
     resultSource: 'fallback',
-    resultCount: 0, // unknown yet - fallback hasn't completed
+    resultCount: freshResults.length,
   });
 
   return new ApiResponse(
-    202,
-    { source: 'fallback', queryId, streamUrl: `/api/v1/stream/${queryId}` },
-    'Searching further - connect to the stream URL for results.'
+    200,
+    { source: 'agent', results: freshResults },
+    freshResults.length > 0 ? 'Results found via live search.' : 'No datasets found for this query.'
   ).send(res);
 });
 

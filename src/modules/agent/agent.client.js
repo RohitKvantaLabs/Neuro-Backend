@@ -48,27 +48,16 @@ async function parseQuery(query) {
 }
 
 /**
- * Fire-and-forget from Node's perspective - we do not need to await the
- * response body's content, but the request itself should not be
- * cancelled early. Node typically calls this and immediately returns a
- * query_id to the frontend so it can open an SSE connection, without
- * waiting on this promise to resolve.
+ * BLOCKING - waits for Python to finish writing datasets into Mongo,
+ * then returns only the receipt. Python owns all writes to the datasets
+ * collection; Node re-queries Mongo after this resolves to pick them up.
+ * Returns: { query_id, datasets_found, published }
+ * Throws on HTTP/network failure — let the controller handle it.
  */
-async function triggerFallbackSearch({ queryId, query, filters }) {
-  try {
-    const { data } = await client.post('/agents/fallback-search', {
-      query_id: queryId,
-      query,
-      filters,
-    });
-    logger.info(`Fallback search completed for query_id=${queryId}: datasets_found=${data.datasets_found}`);
-    return data;
-  } catch (err) {
-    // Don't throw - the frontend is waiting on the SSE channel, not this
-    // promise. Log loudly so a failure here isn't silently invisible.
-    logger.error(`Fallback search request failed for query_id=${queryId}: ${err.message}`);
-    return null;
-  }
+async function runFallbackSearch({ query, filters }) {
+  const { data } = await client.post('/agents/fallback-search', { query, filters });
+  logger.info(`Fallback agent search completed for query="${query}": datasets_found=${data?.datasets_found ?? 0}, published=${data?.published}`);
+  return data; // { query_id, datasets_found, published } — no dataset array
 }
 
-module.exports = { parseQuery, triggerFallbackSearch };
+module.exports = { parseQuery, runFallbackSearch };
