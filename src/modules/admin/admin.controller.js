@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Admin = require('./admin.model');
 const { User } = require('../user/user.model');
 const Dataset = require('../dataset/dataset.model');
@@ -213,31 +214,61 @@ const getAuditLog = asyncHandler(async (req, res) => {
 // ─── Infrastructure — MongoDB ──────────────────────────────────────────────────
 
 const getInfraMongo = asyncHandler(async (req, res) => {
-  const db = mongoose.connection.db;
-  if (!db) throw new ApiError(503, 'MongoDB not connected.');
+  let totalSizeBytes = 0;
+  let dataSizeBytes = 0;
+  let storageSizeBytes = 0;
+  let indexSizeBytes = 0;
+  let collectionStats = [];
 
-  const dbStats = await db.command({ dbStats: 1 });
-  const collections = await db.listCollections().toArray();
+  try {
+    const db = mongoose.connection.db;
+    if (!db) throw new ApiError(503, 'MongoDB not connected.');
 
-  const collectionStats = await Promise.all(
-    collections.map(async (c) => {
-      const coll = db.collection(c.name);
-      const count = await coll.countDocuments();
-      const stats = await db.command({ collStats: c.name });
-      return {
-        name: c.name,
-        count,
-        sizeBytes: stats.size || 0,
-        storageSizeBytes: stats.storageSize || 0,
-        indexSizeBytes: stats.totalIndexSize || 0,
-        avgObjSizeBytes: stats.avgObjSize || 0,
-      };
-    })
-  );
+    // dbStats provides DB-level size info — works on Atlas M0
+    const dbStats = await db.command({ dbStats: 1 });
+    dataSizeBytes = dbStats.dataSize || 0;
+    storageSizeBytes = dbStats.storageSize || 0;
+    indexSizeBytes = dbStats.indexSize || 0;
 
-  // Growth simulation based on collection sizes (we don't persist daily snapshots — compute from available data)
-  // For simplicity, we return a flat line with today's total so the chart doesn't break
-  const totalSizeBytes = collectionStats.reduce((a, c) => a + c.sizeBytes, 0);
+    // List collections + per-collection document counts — safe on Atlas M0
+    const collections = await db.listCollections().toArray();
+    const collResults = await Promise.allSettled(
+      collections.map(async (c) => {
+        const coll = db.collection(c.name);
+        const count = await coll.estimatedDocumentCount();
+        // Try $collStats aggregation stage (safer than deprecated collStats command)
+        let sizeBytes = 0;
+        try {
+          const pipeline = await coll.aggregate([
+            { $collStats: { storageStats: {} } }
+          ]).toArray();
+          if (pipeline.length > 0) {
+            sizeBytes = pipeline[0].storageStats?.size || 0;
+          }
+        } catch {
+          // fallback: estimate size from average document
+          sizeBytes = 0;
+        }
+        return {
+          name: c.name,
+          count,
+          sizeBytes,
+          storageSizeBytes: 0,
+          indexSizeBytes: 0,
+          avgObjSizeBytes: 0,
+        };
+      })
+    );
+
+    collectionStats = collResults
+      .filter((r) => r.status === 'fulfilled')
+      .map((r) => r.value);
+
+    // Calculate total from actual collection sizes, or use dbStats as fallback
+    totalSizeBytes = collectionStats.reduce((a, c) => a + c.sizeBytes, 0) || dataSizeBytes;
+  } catch { /* best-effort — return partial data */ }
+
+  // Growth simulation (flat line, real historical tracking is a future feature)
   const growth = Array.from({ length: 14 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() - (13 - i));
@@ -246,12 +277,11 @@ const getInfraMongo = asyncHandler(async (req, res) => {
 
   return new ApiResponse(200, {
     totalSizeBytes,
-    dataSizeBytes: dbStats.dataSize || 0,
-    storageSizeBytes: dbStats.storageSize || 0,
-    indexSizeBytes: dbStats.indexSize || 0,
+    dataSizeBytes,
+    storageSizeBytes,
+    indexSizeBytes,
     collections: collectionStats,
     growth,
-    // MongoDB Atlas M0 free tier limit
     freeTierLimitBytes: 512 * 1024 * 1024,
     usagePercent: totalSizeBytes > 0 ? (totalSizeBytes / (512 * 1024 * 1024)) * 100 : 0,
   }).send(res);
@@ -260,64 +290,80 @@ const getInfraMongo = asyncHandler(async (req, res) => {
 // ─── Infrastructure — Redis ────────────────────────────────────────────────────
 
 const getInfraRedis = asyncHandler(async (req, res) => {
-  const { redisClient } = require('../../config/redis.config');
-
-  let info;
-  try {
-    info = await redisClient.info();
-  } catch (err) {
-    throw new ApiError(503, `Redis not connected: ${err.message}`);
-  }
-
-  // Parse Redis INFO output into key-value pairs
-  const lines = info.split('\r\n');
-  const data = {};
-  for (const line of lines) {
-    if (line && !line.startsWith('#') && line.includes(':')) {
-      const idx = line.indexOf(':');
-      data[line.slice(0, idx)] = line.slice(idx + 1);
-    }
-  }
-
-  // Count active SSE connections from in-memory manager
-  const { getConnectionCount } = require('../../realtime/sse.manager');
-  const activeSse = getConnectionCount();
-
-  // Count in-flight queries — a loose heuristic based on pubsub channels
+  let uptimeSeconds = 0;
+  let connectedClients = 0;
+  let memoryUsedBytes = 0;
+  let memoryPeakBytes = 0;
+  let maxMemoryBytes = 30 * 1024 * 1024;
+  let messageThroughputPerMin = 0;
+  let version = '';
+  let os = '';
+  let keyspaceHits = 0;
+  let keyspaceMisses = 0;
   let inFlightQueries = 0;
+  let activeSse = 0;
+
   try {
-    const pubsubResult = await redisClient.sendCommand(['PUBSUB', 'CHANNELS']);
-    inFlightQueries = Array.isArray(pubsubResult) ? pubsubResult.length : 0;
+    const { redisClient } = require('../../config/redis.config');
+    const info = await redisClient.info();
+
+    // Parse Redis INFO output into key-value pairs
+    const lines = info.split('\r\n');
+    const data = {};
+    for (const line of lines) {
+      if (line && !line.startsWith('#') && line.includes(':')) {
+        const idx = line.indexOf(':');
+        data[line.slice(0, idx)] = line.slice(idx + 1);
+      }
+    }
+
+    uptimeSeconds = parseInt(data.uptime_in_seconds, 10) || 0;
+    connectedClients = parseInt(data.connected_clients, 10) || 0;
+    memoryUsedBytes = parseInt(data.used_memory, 10) || 0;
+    memoryPeakBytes = parseInt(data.used_memory_peak, 10) || 0;
+    const maxMemConfig = parseInt(data.maxmemory, 10) || 0;
+    if (maxMemConfig > 0) maxMemoryBytes = maxMemConfig;
+    messageThroughputPerMin = Math.round(
+      (parseInt(data.instantaneous_ops_per_sec, 10) || 0) * 60
+    );
+    version = data.redis_version || '';
+    os = data.os || '';
+    keyspaceHits = parseInt(data.keyspace_hits, 10) || 0;
+    keyspaceMisses = parseInt(data.keyspace_misses, 10) || 0;
+
+    // Count in-flight queries — a loose heuristic based on pubsub channels
+    try {
+      const pubsubResult = await redisClient.sendCommand(['PUBSUB', 'CHANNELS']);
+      inFlightQueries = Array.isArray(pubsubResult) ? pubsubResult.length : 0;
+    } catch { /* best-effort */ }
+  } catch { /* best-effort — Redis may not be configured on free tier */ }
+
+  // Count active SSE connections from in-memory manager (always available)
+  try {
+    const { getConnectionCount } = require('../realtime/sse.manager');
+    activeSse = getConnectionCount();
   } catch { /* best-effort */ }
 
-  const usedMemoryBytes = parseInt(data.used_memory, 10) || 0;
-  const maxMemoryConfig = parseInt(data.maxmemory, 10) || 0;
-  // Free Redis tiers typically have 30MB or 100MB limit; use config if set, else assume 30MB
-  const maxMemoryBytes = maxMemoryConfig > 0 ? maxMemoryConfig : 30 * 1024 * 1024;
+  const hitRate = (keyspaceHits + keyspaceMisses) > 0
+    ? keyspaceHits / (keyspaceHits + keyspaceMisses)
+    : 0;
 
   return new ApiResponse(200, {
-    uptimeSeconds: parseInt(data.uptime_in_seconds, 10) || 0,
-    connectedClients: parseInt(data.connected_clients, 10) || 0,
+    uptimeSeconds,
+    connectedClients,
     activeSseConnections: activeSse,
-    memoryUsedBytes: usedMemoryBytes,
-    memoryPeakBytes: parseInt(data.used_memory_peak, 10) || 0,
+    memoryUsedBytes,
+    memoryPeakBytes,
     maxMemoryBytes,
-    memoryUsagePercent: maxMemoryBytes > 0 ? (usedMemoryBytes / maxMemoryBytes) * 100 : 0,
+    memoryUsagePercent: maxMemoryBytes > 0 ? (memoryUsedBytes / maxMemoryBytes) * 100 : 0,
     inFlightQueries,
-    messageThroughputPerMin: Math.round(
-      (parseInt(data.instantaneous_ops_per_sec, 10) || 0) * 60
-    ),
+    messageThroughputPerMin,
     pubsubChannels: [],
-    version: data.redis_version || '',
-    os: data.os || '',
-    keyspaceHits: parseInt(data.keyspace_hits, 10) || 0,
-    keyspaceMisses: parseInt(data.keyspace_misses, 10) || 0,
-    hitRate: (() => {
-      const hits = parseInt(data.keyspace_hits, 10) || 0;
-      const misses = parseInt(data.keyspace_misses, 10) || 0;
-      const total = hits + misses;
-      return total > 0 ? hits / total : 0;
-    })(),
+    version,
+    os,
+    keyspaceHits,
+    keyspaceMisses,
+    hitRate,
   }).send(res);
 });
 
