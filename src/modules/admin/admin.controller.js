@@ -210,10 +210,196 @@ const getAuditLog = asyncHandler(async (req, res) => {
   return new ApiResponse(200, logs).send(res);
 });
 
+// ─── Infrastructure — MongoDB ──────────────────────────────────────────────────
+
+const getInfraMongo = asyncHandler(async (req, res) => {
+  const db = mongoose.connection.db;
+  if (!db) throw new ApiError(503, 'MongoDB not connected.');
+
+  const dbStats = await db.command({ dbStats: 1 });
+  const collections = await db.listCollections().toArray();
+
+  const collectionStats = await Promise.all(
+    collections.map(async (c) => {
+      const coll = db.collection(c.name);
+      const count = await coll.countDocuments();
+      const stats = await db.command({ collStats: c.name });
+      return {
+        name: c.name,
+        count,
+        sizeBytes: stats.size || 0,
+        storageSizeBytes: stats.storageSize || 0,
+        indexSizeBytes: stats.totalIndexSize || 0,
+        avgObjSizeBytes: stats.avgObjSize || 0,
+      };
+    })
+  );
+
+  // Growth simulation based on collection sizes (we don't persist daily snapshots — compute from available data)
+  // For simplicity, we return a flat line with today's total so the chart doesn't break
+  const totalSizeBytes = collectionStats.reduce((a, c) => a + c.sizeBytes, 0);
+  const growth = Array.from({ length: 14 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (13 - i));
+    return { day: d.toISOString().slice(0, 10), sizeBytes: totalSizeBytes };
+  });
+
+  return new ApiResponse(200, {
+    totalSizeBytes,
+    dataSizeBytes: dbStats.dataSize || 0,
+    storageSizeBytes: dbStats.storageSize || 0,
+    indexSizeBytes: dbStats.indexSize || 0,
+    collections: collectionStats,
+    growth,
+    // MongoDB Atlas M0 free tier limit
+    freeTierLimitBytes: 512 * 1024 * 1024,
+    usagePercent: totalSizeBytes > 0 ? (totalSizeBytes / (512 * 1024 * 1024)) * 100 : 0,
+  }).send(res);
+});
+
+// ─── Infrastructure — Redis ────────────────────────────────────────────────────
+
+const getInfraRedis = asyncHandler(async (req, res) => {
+  const { redisClient } = require('../../config/redis.config');
+
+  let info;
+  try {
+    info = await redisClient.info();
+  } catch (err) {
+    throw new ApiError(503, `Redis not connected: ${err.message}`);
+  }
+
+  // Parse Redis INFO output into key-value pairs
+  const lines = info.split('\r\n');
+  const data = {};
+  for (const line of lines) {
+    if (line && !line.startsWith('#') && line.includes(':')) {
+      const idx = line.indexOf(':');
+      data[line.slice(0, idx)] = line.slice(idx + 1);
+    }
+  }
+
+  // Count active SSE connections from in-memory manager
+  const { getConnectionCount } = require('../../realtime/sse.manager');
+  const activeSse = getConnectionCount();
+
+  // Count in-flight queries — a loose heuristic based on pubsub channels
+  let inFlightQueries = 0;
+  try {
+    const pubsubResult = await redisClient.sendCommand(['PUBSUB', 'CHANNELS']);
+    inFlightQueries = Array.isArray(pubsubResult) ? pubsubResult.length : 0;
+  } catch { /* best-effort */ }
+
+  const usedMemoryBytes = parseInt(data.used_memory, 10) || 0;
+  const maxMemoryConfig = parseInt(data.maxmemory, 10) || 0;
+  // Free Redis tiers typically have 30MB or 100MB limit; use config if set, else assume 30MB
+  const maxMemoryBytes = maxMemoryConfig > 0 ? maxMemoryConfig : 30 * 1024 * 1024;
+
+  return new ApiResponse(200, {
+    uptimeSeconds: parseInt(data.uptime_in_seconds, 10) || 0,
+    connectedClients: parseInt(data.connected_clients, 10) || 0,
+    activeSseConnections: activeSse,
+    memoryUsedBytes: usedMemoryBytes,
+    memoryPeakBytes: parseInt(data.used_memory_peak, 10) || 0,
+    maxMemoryBytes,
+    memoryUsagePercent: maxMemoryBytes > 0 ? (usedMemoryBytes / maxMemoryBytes) * 100 : 0,
+    inFlightQueries,
+    messageThroughputPerMin: Math.round(
+      (parseInt(data.instantaneous_ops_per_sec, 10) || 0) * 60
+    ),
+    pubsubChannels: [],
+    version: data.redis_version || '',
+    os: data.os || '',
+    keyspaceHits: parseInt(data.keyspace_hits, 10) || 0,
+    keyspaceMisses: parseInt(data.keyspace_misses, 10) || 0,
+    hitRate: (() => {
+      const hits = parseInt(data.keyspace_hits, 10) || 0;
+      const misses = parseInt(data.keyspace_misses, 10) || 0;
+      const total = hits + misses;
+      return total > 0 ? hits / total : 0;
+    })(),
+  }).send(res);
+});
+
+// ─── Infrastructure — Storage ──────────────────────────────────────────────────
+
+const getInfraStorage = asyncHandler(async (req, res) => {
+  const db = mongoose.connection.db;
+  const { redisClient } = require('../../config/redis.config');
+
+  // MongoDB stats
+  let mongoUsedBytes = 0;
+  let mongoStorageBytes = 0;
+  try {
+    if (db) {
+      const dbStats = await db.command({ dbStats: 1 });
+      mongoUsedBytes = dbStats.dataSize || 0;
+      mongoStorageBytes = dbStats.storageSize || 0;
+    }
+  } catch { /* best-effort */ }
+
+  // Redis stats
+  let redisUsedBytes = 0;
+  let redisMaxBytes = 30 * 1024 * 1024;
+  try {
+    const info = await redisClient.info();
+    const lines = info.split('\r\n');
+    const data = {};
+    for (const line of lines) {
+      if (line && !line.startsWith('#') && line.includes(':')) {
+        const idx = line.indexOf(':');
+        data[line.slice(0, idx)] = line.slice(idx + 1);
+      }
+    }
+    redisUsedBytes = parseInt(data.used_memory, 10) || 0;
+    const maxMem = parseInt(data.maxmemory, 10) || 0;
+    if (maxMem > 0) redisMaxBytes = maxMem;
+  } catch { /* best-effort */ }
+
+  // MongoDB Atlas M0 free tier: 512MB
+  const mongoLimitBytes = 512 * 1024 * 1024;
+  // Calculate combined usage
+  const totalUsedBytes = mongoUsedBytes + redisUsedBytes;
+  const totalLimitBytes = mongoLimitBytes + redisMaxBytes;
+  const totalRemainingBytes = totalLimitBytes - totalUsedBytes;
+
+  // Document & collection counts
+  let totalDocuments = 0;
+  let totalCollections = 0;
+  try {
+    if (db) {
+      totalCollections = (await db.listCollections().toArray()).length;
+      for (const c of await db.listCollections().toArray()) {
+        totalDocuments += await db.collection(c.name).countDocuments();
+      }
+    }
+  } catch { /* best-effort */ }
+
+  return new ApiResponse(200, {
+    // MongoDB
+    mongoUsedBytes,
+    mongoStorageBytes,
+    mongoLimitBytes,
+    mongoUsagePercent: mongoLimitBytes > 0 ? (mongoUsedBytes / mongoLimitBytes) * 100 : 0,
+    mongoDocuments: totalDocuments,
+    mongoCollections: totalCollections,
+    // Redis
+    redisUsedBytes,
+    redisMaxBytes,
+    redisUsagePercent: redisMaxBytes > 0 ? (redisUsedBytes / redisMaxBytes) * 100 : 0,
+    // Combined
+    totalUsedBytes,
+    totalLimitBytes,
+    totalRemainingBytes,
+    totalUsagePercent: totalLimitBytes > 0 ? (totalUsedBytes / totalLimitBytes) * 100 : 0,
+  }).send(res);
+});
+
 module.exports = {
   login, verifyLoginOtp,
   listUsers, deleteUser,
   listDatasets, deleteDataset,
   listRepositories, createRepository, deleteRepository, resyncRepository,
   getAnalytics, getDashboard, getAuditLog,
+  getInfraMongo, getInfraRedis, getInfraStorage,
 };

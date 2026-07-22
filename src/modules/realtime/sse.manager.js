@@ -28,4 +28,8 @@ function closeConnection(queryId) {
   connections.delete(queryId);
 }
 
-module.exports = { addConnection, removeConnection, sendToConnection, closeConnection };
+function getConnectionCount() {
+  return connections.size;
+}
+
+module.exports = { addConnection, removeConnection, sendToConnection, closeConnection, getConnectionCount };

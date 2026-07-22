@@ -5,6 +5,7 @@ const {
   listDatasets, deleteDataset,
   listRepositories, createRepository, deleteRepository, resyncRepository,
   getAnalytics, getDashboard, getAuditLog,
+  getInfraMongo, getInfraRedis, getInfraStorage,
 } = require('./admin.controller');
 const { requireAuth, requireAdmin } = require('../auth/auth.middleware');
 const { otpVerifyLimiter, loginLimiter } = require('../../middleware/rateLimiter');
@@ -37,5 +38,10 @@ router.post('/repositories/:id/resync', resyncRepository);
 router.get('/analytics', getAnalytics);
 router.get('/dashboard', getDashboard);
 router.get('/audit-log', getAuditLog);
+
+// Infrastructure (§11.9)
+router.get('/infra/mongo', getInfraMongo);
+router.get('/infra/redis', getInfraRedis);
+router.get('/infra/storage', getInfraStorage);
 
 module.exports = router;
