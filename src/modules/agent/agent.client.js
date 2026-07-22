@@ -2,6 +2,8 @@ const axios = require('axios');
 const crypto = require('crypto');
 const env = require('../../config/env.config');
 const logger = require('../../utils/logger');
+const TokenUsage = require('../admin/tokenUsage.model');
+const AgentLog = require('../admin/agentLog.model');
 
 /**
  * The only place in this codebase that calls the Python agent service.
@@ -18,15 +20,24 @@ const client = axios.create({
 });
 
 /**
+ * Estimate tokens from a text string (rough heuristic: ~4 chars per token)
+ */
+function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
+}
+
+/**
  * BLOCKING - Node waits for this before querying Mongo. See CLAUDE.md
  * (Python repo) constraint: this is deliberately synchronous.
  */
 async function parseQuery(query) {
+  const start = Date.now();
   try {
     const { data } = await client.post('/agents/parse-query', { query });
     const filters = data?.filters && typeof data.filters === 'object' ? data.filters : {};
 
-    return {
+    const result = {
       ...filters,
       raw_query: query,
       modality: Array.isArray(filters.modality) ? filters.modality : [],
@@ -35,8 +46,41 @@ async function parseQuery(query) {
       task: filters.task || null,
       format: Array.isArray(filters.format) ? filters.format : [],
     };
+
+    const duration = Date.now() - start;
+    const tokens = estimateTokens(query) + (data?.filters ? estimateTokens(JSON.stringify(data.filters)) : 0);
+
+    // Fire-and-forget token & agent logging
+    TokenUsage.create({
+      agent: 'parse_query',
+      model: 'gpt-4',
+      tokens,
+      query: query.slice(0, 500),
+      durationMs: duration,
+      status: 'success',
+    }).catch(() => {});
+    AgentLog.create({
+      agent: 'parse_query',
+      query: query.slice(0, 500),
+      durationMs: duration,
+      resultCount: Object.keys(filters).length,
+      status: 'success',
+    }).catch(() => {});
+
+    return result;
   } catch (err) {
     logger.warn(`Python parse-query failed for query="${query}": ${err.message}`);
+    const duration = Date.now() - start;
+
+    AgentLog.create({
+      agent: 'parse_query',
+      query: query.slice(0, 500),
+      durationMs: duration,
+      resultCount: 0,
+      status: 'error',
+      errorMessage: err.message,
+    }).catch(() => {});
+
     return {
       raw_query: query,
       modality: [],
@@ -55,14 +99,56 @@ async function parseQuery(query) {
  * Returns: { query_id, datasets_found, published }
  * Throws on HTTP/network failure — let the controller handle it.
  */
-async function runFallbackSearch({ query, filters }) {
-  const { data } = await client.post('/agents/fallback-search', {
-    query_id: crypto.randomUUID(),
-    query,
-    filters,
-  });
-  logger.info(`Fallback agent search completed for query="${query}": datasets_found=${data?.datasets_found ?? 0}, published=${data?.published}`);
-  return data; // { query_id, datasets_found, published } — no dataset array
+async function runFallbackSearch({ query, filters, userId, userEmail }) {
+  const start = Date.now();
+  try {
+    const { data } = await client.post('/agents/fallback-search', {
+      query_id: crypto.randomUUID(),
+      query,
+      filters,
+    });
+    const duration = Date.now() - start;
+    const tokens = estimateTokens(query) + estimateTokens(JSON.stringify(filters || {}));
+
+    logger.info(`Fallback agent search completed for query="${query}": datasets_found=${data?.datasets_found ?? 0}, published=${data?.published}`);
+
+    // Fire-and-forget token & agent logging
+    TokenUsage.create({
+      userId: userId || null,
+      userEmail: userEmail || 'anonymous',
+      agent: 'fallback',
+      model: 'gpt-4',
+      tokens,
+      query: query.slice(0, 500),
+      durationMs: duration,
+      status: 'success',
+    }).catch(() => {});
+    AgentLog.create({
+      userId: userId || null,
+      agent: 'fallback',
+      query: query.slice(0, 500),
+      durationMs: duration,
+      resultCount: data?.datasets_found ?? 0,
+      status: 'success',
+    }).catch(() => {});
+
+    return data; // { query_id, datasets_found, published } — no dataset array
+  } catch (err) {
+    const duration = Date.now() - start;
+    logger.error(`Fallback agent search failed for query="${query}": ${err.message}`);
+
+    AgentLog.create({
+      userId: userId || null,
+      agent: 'fallback',
+      query: query.slice(0, 500),
+      durationMs: duration,
+      resultCount: 0,
+      status: 'error',
+      errorMessage: err.message,
+    }).catch(() => {});
+
+    throw err; // re-throw for the controller to handle
+  }
 }
 
 module.exports = { parseQuery, runFallbackSearch };

@@ -6,6 +6,7 @@ const {
   listRepositories, createRepository, deleteRepository, resyncRepository,
   getAnalytics, getDashboard, getAuditLog,
   getInfraMongo, getInfraRedis, getInfraStorage,
+  getTokens, getAgents,
 } = require('./admin.controller');
 const { requireAuth, requireAdmin } = require('../auth/auth.middleware');
 const { otpVerifyLimiter, loginLimiter } = require('../../middleware/rateLimiter');
@@ -43,5 +44,9 @@ router.get('/audit-log', getAuditLog);
 router.get('/infra/mongo', getInfraMongo);
 router.get('/infra/redis', getInfraRedis);
 router.get('/infra/storage', getInfraStorage);
+
+// Token usage & Agent activity
+router.get('/tokens', getTokens);
+router.get('/agents', getAgents);
 
 module.exports = router;

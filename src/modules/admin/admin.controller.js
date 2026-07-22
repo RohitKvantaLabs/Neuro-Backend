@@ -441,6 +441,28 @@ const getInfraStorage = asyncHandler(async (req, res) => {
   }).send(res);
 });
 
+// ─── Infrastructure — Token Usage ─────────────────────────────────────────────
+
+const getTokens = asyncHandler(async (req, res) => {
+  const TokenUsage = require('./tokenUsage.model');
+  const tokens = await TokenUsage.find()
+    .sort({ createdAt: -1 })
+    .limit(5000)
+    .lean();
+  return new ApiResponse(200, tokens).send(res);
+});
+
+// ─── Infrastructure — Agent Activity ──────────────────────────────────────────
+
+const getAgents = asyncHandler(async (req, res) => {
+  const AgentLog = require('./agentLog.model');
+  const logs = await AgentLog.find()
+    .sort({ createdAt: -1 })
+    .limit(500)
+    .lean();
+  return new ApiResponse(200, logs).send(res);
+});
+
 module.exports = {
   login, verifyLoginOtp,
   listUsers, deleteUser,
@@ -448,4 +470,5 @@ module.exports = {
   listRepositories, createRepository, deleteRepository, resyncRepository,
   getAnalytics, getDashboard, getAuditLog,
   getInfraMongo, getInfraRedis, getInfraStorage,
+  getTokens, getAgents,
 };

@@ -5,6 +5,7 @@ const logger = require('../../utils/logger');
 const { parseQuery, runFallbackSearch } = require('../agent/agent.client');
 const { searchDatasets } = require('./dataset.service');
 const Dataset = require('./dataset.model');
+const { User } = require('../user/user.model');
 const QueryLog = require('../queryLog/queryLog.model');
 const SearchHistory = require('../user/searchHistory.model');
 
@@ -58,8 +59,20 @@ const search = asyncHandler(async (req, res) => {
   // Cache miss: return Python's verified records directly. A second Mongo
   // query could exclude newly discovered data that is not an exact filter fit.
   let fallbackDatasets = [];
+  let userEmail = 'anonymous';
+  if (req.user?.id) {
+    try {
+      const u = await User.findById(req.user.id).select('email').lean();
+      if (u) userEmail = u.email;
+    } catch { /* best-effort */ }
+  }
   try {
-    const agentResult = await runFallbackSearch({ query, filters });
+    const agentResult = await runFallbackSearch({
+      query,
+      filters,
+      userId: req.user?.id,
+      userEmail,
+    });
     fallbackDatasets = Array.isArray(agentResult?.datasets) ? agentResult.datasets : [];
   } catch (err) {
     logger.error(`Fallback agent search failed for query="${query}": ${err.message}`);
