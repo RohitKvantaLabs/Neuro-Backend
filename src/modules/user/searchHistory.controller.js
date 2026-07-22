@@ -3,11 +3,11 @@ const ApiError = require('../../utils/ApiError');
 const ApiResponse = require('../../utils/ApiResponse');
 const asyncHandler = require('../../utils/asyncHandler');
 
-// GET /users/search-history — most recent first, limit 100 (matches frontend)
+// GET /users/search-history — most recent first, limit 30
 const listHistory = asyncHandler(async (req, res) => {
   const items = await SearchHistory.find({ userId: req.user.id })
     .sort({ createdAt: -1 })
-    .limit(100)
+    .limit(30)
     .lean();
   return new ApiResponse(200, items).send(res);
 });
