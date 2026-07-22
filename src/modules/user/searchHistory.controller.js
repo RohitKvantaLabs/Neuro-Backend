@@ -1,4 +1,4 @@
-6const SearchHistory = require('./searchHistory.model');
+const SearchHistory = require('./searchHistory.model');
 const ApiError = require('../../utils/ApiError');
 const ApiResponse = require('../../utils/ApiResponse');
 const asyncHandler = require('../../utils/asyncHandler');
