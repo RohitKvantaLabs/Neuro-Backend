@@ -64,4 +64,14 @@ const removeItem = asyncHandler(async (req, res) => {
   return new ApiResponse(200, null, 'Item removed from collection.').send(res);
 });
 
-module.exports = { createCollection, listCollections, deleteCollection, addItem, removeItem };
+// GET /users/collections/:id/items — list items in a collection with snapshot data
+const getItems = asyncHandler(async (req, res) => {
+  const col = await assertOwnsCollection(req.params.id, req.user.id);
+  const items = await CollectionItem.find({ collectionId: col._id })
+    .populate('savedDatasetId')
+    .sort({ createdAt: -1 })
+    .lean();
+  return new ApiResponse(200, items).send(res);
+});
+
+module.exports = { createCollection, listCollections, deleteCollection, addItem, removeItem, getItems };

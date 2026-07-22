@@ -4,6 +4,7 @@ const asyncHandler = require('../../utils/asyncHandler');
 const logger = require('../../utils/logger');
 const { parseQuery, runFallbackSearch } = require('../agent/agent.client');
 const { searchDatasets } = require('./dataset.service');
+const Dataset = require('./dataset.model');
 const QueryLog = require('../queryLog/queryLog.model');
 const SearchHistory = require('../user/searchHistory.model');
 
@@ -82,4 +83,11 @@ const search = asyncHandler(async (req, res) => {
   ).send(res);
 });
 
-module.exports = { search };
+// GET /datasets/:id — fetch a single dataset by Mongo _id for the detail page
+const getById = asyncHandler(async (req, res) => {
+  const dataset = await Dataset.findById(req.params.id).lean();
+  if (!dataset) throw new ApiError(404, 'Dataset not found.');
+  return new ApiResponse(200, dataset).send(res);
+});
+
+module.exports = { search, getById };
