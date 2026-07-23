@@ -5,6 +5,10 @@ const logger = require('../../utils/logger');
 const TokenUsage = require('../admin/tokenUsage.model');
 const AgentLog = require('../admin/agentLog.model');
 
+// ponytail: in-process query-parse cache — same query within 5 min skips LLM entirely.
+const _parseCache = new Map(); // key: query string, value: { filters, expiresAt }
+const PARSE_CACHE_TTL_MS = 5 * 60 * 1000;
+
 /**
  * The only place in this codebase that calls the Python agent service.
  * Every call carries the shared internal secret - see
@@ -32,6 +36,13 @@ function estimateTokens(text) {
  * (Python repo) constraint: this is deliberately synchronous.
  */
 async function parseQuery(query, userId = null, userEmail = 'anonymous') {
+  // ponytail: cache hit — skip LLM entirely for repeated queries.
+  const cached = _parseCache.get(query);
+  if (cached && cached.expiresAt > Date.now()) {
+    logger.info(`parseQuery cache hit for query="${query}"`);
+    return cached.filters;
+  }
+
   const start = Date.now();
   try {
     const { data } = await client.post('/agents/parse-query', { query });
@@ -46,6 +57,9 @@ async function parseQuery(query, userId = null, userEmail = 'anonymous') {
       task: filters.task || null,
       format: Array.isArray(filters.format) ? filters.format : [],
     };
+
+    // ponytail: store in cache before returning.
+    _parseCache.set(query, { filters: result, expiresAt: Date.now() + PARSE_CACHE_TTL_MS });
 
     const duration = Date.now() - start;
     const tokens = estimateTokens(query) + (data?.filters ? estimateTokens(JSON.stringify(data.filters)) : 0);

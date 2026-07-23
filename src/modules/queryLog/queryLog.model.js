@@ -11,4 +11,8 @@ const queryLogSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// ponytail: compound index for per-user analytics and admin queries sorted by time.
+queryLogSchema.index({ userId: 1, createdAt: -1 });
+queryLogSchema.index({ createdAt: -1 }); // admin dashboard sort
+
 module.exports = mongoose.model('QueryLog', queryLogSchema);

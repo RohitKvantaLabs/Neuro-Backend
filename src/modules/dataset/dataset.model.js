@@ -49,5 +49,15 @@ const datasetSchema = new mongoose.Schema(
 );
 
 datasetSchema.index({ source: 1, source_id: 1 }, { unique: true });
+// ponytail: indexes for structured filter queries — avoids full collection scans.
+datasetSchema.index({ modality: 1 });
+datasetSchema.index({ species: 1 });
+datasetSchema.index({ keywords: 1 });
+datasetSchema.index({ trust_tier: 1, last_verified_at: 1 });
+// Text index for the raw-query fallback path — replaces the unanchored regex scan.
+datasetSchema.index(
+  { title: 'text', description: 'text', keywords: 'text' },
+  { name: 'dataset_text_search', weights: { title: 10, keywords: 5, description: 1 } }
+);
 
 module.exports = mongoose.model('Dataset', datasetSchema);

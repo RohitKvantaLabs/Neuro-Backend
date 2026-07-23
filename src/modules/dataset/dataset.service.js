@@ -16,11 +16,9 @@ function buildMongoQuery(filters = {}) {
   if (normalizedFilters.task) query.keywords = { ...(query.keywords || {}), $in: [...(query.keywords?.$in || []), normalizedFilters.task] };
   if (normalizedFilters.format?.length) query.keywords = { $in: [...(query.keywords?.$in || []), ...normalizedFilters.format] };
 
-  // Fallback: if nothing structured matched, do a loose text search on
-  // title/description/keywords using the raw query string.
+  // ponytail: use $text index instead of unanchored regex — no full collection scan.
   if (Object.keys(query).length === 0 && normalizedFilters.raw_query) {
-    const regex = new RegExp(normalizedFilters.raw_query.split(/\s+/).join('|'), 'i');
-    query.$or = [{ title: regex }, { description: regex }, { keywords: regex }];
+    query.$text = { $search: normalizedFilters.raw_query };
   }
 
   return query;
@@ -28,7 +26,11 @@ function buildMongoQuery(filters = {}) {
 
 async function searchDatasets(filters, limit = 20) {
   const mongoQuery = buildMongoQuery(filters);
-  return Dataset.find(mongoQuery).limit(limit).lean();
+  // ponytail: if $text query, sort by text score for relevance; otherwise no sort needed.
+  const hasText = Boolean(mongoQuery.$text);
+  const projection = hasText ? { score: { $meta: 'textScore' } } : {};
+  const sort = hasText ? { score: { $meta: 'textScore' } } : {};
+  return Dataset.find(mongoQuery, projection).sort(sort).limit(limit).lean();
 }
 
 module.exports = { buildMongoQuery, searchDatasets };
