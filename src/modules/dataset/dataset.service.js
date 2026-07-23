@@ -26,11 +26,29 @@ function buildMongoQuery(filters = {}) {
 
 async function searchDatasets(filters, limit = 20) {
   const mongoQuery = buildMongoQuery(filters);
-  // ponytail: if $text query, sort by text score for relevance; otherwise no sort needed.
   const hasText = Boolean(mongoQuery.$text);
-  const projection = hasText ? { score: { $meta: 'textScore' } } : {};
-  const sort = hasText ? { score: { $meta: 'textScore' } } : {};
-  return Dataset.find(mongoQuery, projection).sort(sort).limit(limit).lean();
+  const textProjection = { score: { $meta: 'textScore' } };
+  const textSort = { score: { $meta: 'textScore' } };
+
+  if (hasText) {
+    return Dataset.find(mongoQuery, textProjection).sort(textSort).limit(limit).lean();
+  }
+
+  // Structured AND-query first (fast — uses field indexes).
+  const structured = await Dataset.find(mongoQuery).limit(limit).lean();
+  if (structured.length > 0) return structured;
+
+  // ponytail: two-phase fallback — structured AND-query can miss stored datasets
+  // when agent only populated *some* filter fields (e.g. species:[] stored but
+  // query requires species:["human"]). A $text search on raw_query finds them.
+  if (filters.raw_query) {
+    return Dataset.find(
+      { $text: { $search: filters.raw_query } },
+      textProjection,
+    ).sort(textSort).limit(limit).lean();
+  }
+
+  return [];
 }
 
 module.exports = { buildMongoQuery, searchDatasets };
