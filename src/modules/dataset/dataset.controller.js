@@ -29,9 +29,16 @@ const search = asyncHandler(async (req, res) => {
     throw new ApiError(400, 'A query string of at least 2 characters is required.');
   }
 
+  let userEmail = 'anonymous';
+  if (req.user?.id) {
+    try {
+      const u = await User.findById(req.user.id).select('email').lean();
+      if (u) userEmail = u.email;
+    } catch { /* best-effort */ }
+  }
   let filters;
   try {
-    filters = await parseQuery(query);
+    filters = await parseQuery(query, req.user?.id, userEmail);
   } catch (err) {
     logger.warn(`Dataset search parser fallback triggered for query="${query}": ${err.message}`);
     filters = { raw_query: query };
@@ -59,13 +66,6 @@ const search = asyncHandler(async (req, res) => {
   // Cache miss: return Python's verified records directly. A second Mongo
   // query could exclude newly discovered data that is not an exact filter fit.
   let fallbackDatasets = [];
-  let userEmail = 'anonymous';
-  if (req.user?.id) {
-    try {
-      const u = await User.findById(req.user.id).select('email').lean();
-      if (u) userEmail = u.email;
-    } catch { /* best-effort */ }
-  }
   try {
     const agentResult = await runFallbackSearch({
       query,

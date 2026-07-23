@@ -31,7 +31,7 @@ function estimateTokens(text) {
  * BLOCKING - Node waits for this before querying Mongo. See CLAUDE.md
  * (Python repo) constraint: this is deliberately synchronous.
  */
-async function parseQuery(query) {
+async function parseQuery(query, userId = null, userEmail = 'anonymous') {
   const start = Date.now();
   try {
     const { data } = await client.post('/agents/parse-query', { query });
@@ -52,6 +52,8 @@ async function parseQuery(query) {
 
     // Fire-and-forget token & agent logging
     TokenUsage.create({
+      userId,
+      userEmail,
       agent: 'parse_query',
       model: 'gpt-4',
       tokens,
