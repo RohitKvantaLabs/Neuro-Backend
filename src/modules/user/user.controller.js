@@ -190,6 +190,16 @@ const getMe = asyncHandler(async (req, res) => {
     // ponytail: swallow if socialLink collection doesn't exist yet in early deploys
   }
 
+  const defaultEnabled = user.notificationsEnabled ?? true;
+  const prefs = user.notificationPreferences || {};
+  const notificationPreferences = {
+    email_notifications: prefs.email_notifications ?? defaultEnabled,
+    in_app_notifications: prefs.in_app_notifications ?? defaultEnabled,
+    dataset_updates: prefs.dataset_updates ?? defaultEnabled,
+    new_matches: prefs.new_matches ?? defaultEnabled,
+    account_activity: prefs.account_activity ?? defaultEnabled,
+  };
+
   return new ApiResponse(200, {
     id: user._id,
     name: user.name,
@@ -201,6 +211,7 @@ const getMe = asyncHandler(async (req, res) => {
     isOnboarded: user.isOnboarded,
     isLegacyUser: user.isLegacyUser,
     notificationsEnabled: user.notificationsEnabled,
+    notificationPreferences,
     isAdmin: false,
     socialLinks,
   }).send(res);
@@ -238,8 +249,39 @@ const updateNotifications = asyncHandler(async (req, res) => {
   const { error, value } = updateNotificationsSchema.validate(req.body);
   if (error) throw new ApiError(400, error.details[0].message);
 
-  await User.findByIdAndUpdate(req.user.id, { notificationsEnabled: value.enabled });
-  return new ApiResponse(200, null, 'Notification preference updated.').send(res);
+  const user = await User.findById(req.user.id);
+  if (!user) throw new ApiError(404, 'User not found.');
+
+  if (!user.notificationPreferences) {
+    const d = user.notificationsEnabled ?? true;
+    user.notificationPreferences = {
+      email_notifications: d,
+      in_app_notifications: d,
+      dataset_updates: d,
+      new_matches: d,
+      account_activity: d,
+    };
+  }
+
+  if (typeof value.enabled === 'boolean') {
+    user.notificationsEnabled = value.enabled;
+    user.notificationPreferences.email_notifications = value.enabled;
+    user.notificationPreferences.in_app_notifications = value.enabled;
+  }
+
+  if (value.notificationPreferences) {
+    Object.assign(user.notificationPreferences, value.notificationPreferences);
+  }
+
+  const keys = ['email_notifications', 'in_app_notifications', 'dataset_updates', 'new_matches', 'account_activity'];
+  keys.forEach((k) => {
+    if (typeof value[k] === 'boolean') {
+      user.notificationPreferences[k] = value[k];
+    }
+  });
+
+  await user.save();
+  return new ApiResponse(200, { notificationPreferences: user.notificationPreferences }, 'Notification preference updated.').send(res);
 });
 
 // §10.2 — POST /auth/complete-onboarding

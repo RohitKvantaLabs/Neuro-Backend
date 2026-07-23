@@ -38,8 +38,15 @@ const userSchema = new mongoose.Schema(
     // §10.11a — set by migration script only; never set in normal app flow
     isLegacyUser: { type: Boolean, default: false },
 
-    // §10.7 — notifications toggle
+    // §10.7 — notifications toggle & preferences
     notificationsEnabled: { type: Boolean, default: true },
+    notificationPreferences: {
+      email_notifications: { type: Boolean, default: true },
+      in_app_notifications: { type: Boolean, default: true },
+      dataset_updates: { type: Boolean, default: true },
+      new_matches: { type: Boolean, default: true },
+      account_activity: { type: Boolean, default: true },
+    },
   },
   { timestamps: true }
 );

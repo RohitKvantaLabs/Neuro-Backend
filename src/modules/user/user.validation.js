@@ -71,8 +71,20 @@ const updateMeSchema = Joi.object({
 
 // §10.7 — PATCH /users/me/notifications
 const updateNotificationsSchema = Joi.object({
-  enabled: Joi.boolean().required(),
-});
+  enabled: Joi.boolean().optional(),
+  email_notifications: Joi.boolean().optional(),
+  in_app_notifications: Joi.boolean().optional(),
+  dataset_updates: Joi.boolean().optional(),
+  new_matches: Joi.boolean().optional(),
+  account_activity: Joi.boolean().optional(),
+  notificationPreferences: Joi.object({
+    email_notifications: Joi.boolean().optional(),
+    in_app_notifications: Joi.boolean().optional(),
+    dataset_updates: Joi.boolean().optional(),
+    new_matches: Joi.boolean().optional(),
+    account_activity: Joi.boolean().optional(),
+  }).optional(),
+}).min(1);
 
 module.exports = {
   registerSchema,
