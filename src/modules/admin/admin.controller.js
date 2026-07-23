@@ -106,6 +106,13 @@ const deleteUser = asyncHandler(async (req, res) => {
   return new ApiResponse(200, null, 'User deleted.').send(res);
 });
 
+// ─── Admin accounts ───────────────────────────────────────────────────────────
+
+const getAdmins = asyncHandler(async (req, res) => {
+  const admins = await Admin.find().select('name email createdAt').sort({ createdAt: -1 });
+  return new ApiResponse(200, admins).send(res);
+});
+
 // ─── Datasets ────────────────────────────────────────────────────────────────
 
 const listDatasets = asyncHandler(async (req, res) => {
@@ -122,6 +129,7 @@ const deleteDataset = asyncHandler(async (req, res) => {
   const { datasetId } = req.params;
   const deleted = await Dataset.findByIdAndDelete(datasetId);
   if (!deleted) throw new ApiError(404, 'Dataset not found.');
+  logAdminAction(req.user.id, 'dataset.delete', 'dataset', datasetId);
   return new ApiResponse(200, null, 'Dataset deleted.').send(res);
 });
 
@@ -207,7 +215,11 @@ const getDashboard = asyncHandler(async (req, res) => {
 
 const getAuditLog = asyncHandler(async (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 100, 500);
-  const logs = await AuditLog.find().sort({ createdAt: -1 }).limit(limit);
+  const logs = await AuditLog.find()
+    .populate('adminId', 'name email')
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .lean();
   return new ApiResponse(200, logs).send(res);
 });
 
@@ -465,6 +477,7 @@ const getAgents = asyncHandler(async (req, res) => {
 
 module.exports = {
   login, verifyLoginOtp,
+  getAdmins,
   listUsers, deleteUser,
   listDatasets, deleteDataset,
   listRepositories, createRepository, deleteRepository, resyncRepository,
