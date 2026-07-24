@@ -14,6 +14,8 @@ const { signAccessToken, signRefreshToken, REFRESH_COOKIE_NAME, REFRESH_COOKIE_O
 const { logAdminAction } = require('../../utils/auditLog.util');
 const AuditLog = require('./auditLog.model');
 const Repository = require('./repository.model');
+const SupportTicket = require('./supportTicket.model');
+const HelpArticle = require('./helpArticle.model');
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -475,6 +477,73 @@ const getAgents = asyncHandler(async (req, res) => {
   return new ApiResponse(200, logs).send(res);
 });
 
+// ─── Help Desk — Tickets ─────────────────────────────────────────────────────
+
+const listTickets = asyncHandler(async (req, res) => {
+  const { status, page = 1, limit = 50 } = req.query;
+  const filter = status ? { status } : {};
+  const tickets = await SupportTicket.find(filter)
+    .sort({ createdAt: -1 })
+    .skip((Number(page) - 1) * Number(limit))
+    .limit(Number(limit))
+    .lean();
+  const total = await SupportTicket.countDocuments(filter);
+  return new ApiResponse(200, { tickets, total, page: Number(page), limit: Number(limit) }).send(res);
+});
+
+const updateTicketStatus = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  if (!['open', 'in_progress', 'resolved'].includes(status))
+    throw new ApiError(400, 'Invalid status.');
+
+  const patch = { status };
+  if (status === 'resolved') patch.resolved_at = new Date();
+  else patch.resolved_at = null;
+
+  const ticket = await SupportTicket.findByIdAndUpdate(id, patch, { new: true }).lean();
+  if (!ticket) throw new ApiError(404, 'Ticket not found.');
+  logAdminAction(req.user.id, 'ticket.update', 'supportTicket', id, { status });
+  return new ApiResponse(200, ticket, 'Ticket updated.').send(res);
+});
+
+// ─── Help Desk — Email Ingestion Webhook ────────────────────────────────────
+
+const ingestEmailTicket = asyncHandler(async (req, res) => {
+  const { subject, message, email, name } = req.body;
+  if (!subject || !message) throw new ApiError(400, 'subject and message are required.');
+
+  const ticket = await SupportTicket.create({ subject, message, email, name, source: 'email' });
+  return new ApiResponse(201, ticket, 'Ticket created from email.').send(res);
+});
+
+// ─── Help Desk — Articles ───────────────────────────────────────────────────
+
+const listHelpArticles = asyncHandler(async (req, res) => {
+  const articles = await HelpArticle.find().sort({ updatedAt: -1 }).lean();
+  return new ApiResponse(200, articles).send(res);
+});
+
+const createHelpArticle = asyncHandler(async (req, res) => {
+  const { title, slug, body, published } = req.body;
+  if (!title || !slug) throw new ApiError(400, 'title and slug are required.');
+
+  const existing = await HelpArticle.findOne({ slug });
+  if (existing) throw new ApiError(409, 'An article with this slug already exists.');
+
+  const article = await HelpArticle.create({ title, slug, body, published });
+  logAdminAction(req.user.id, 'article.create', 'helpArticle', article._id.toString(), { title });
+  return new ApiResponse(201, article, 'Article created.').send(res);
+});
+
+const deleteHelpArticle = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const article = await HelpArticle.findByIdAndDelete(id);
+  if (!article) throw new ApiError(404, 'Article not found.');
+  logAdminAction(req.user.id, 'article.delete', 'helpArticle', id, { title: article.title });
+  return new ApiResponse(200, null, 'Article deleted.').send(res);
+});
+
 module.exports = {
   login, verifyLoginOtp,
   getAdmins,
@@ -484,4 +553,6 @@ module.exports = {
   getAnalytics, getDashboard, getAuditLog,
   getInfraMongo, getInfraRedis, getInfraStorage,
   getTokens, getAgents,
+  listTickets, updateTicketStatus, ingestEmailTicket,
+  listHelpArticles, createHelpArticle, deleteHelpArticle,
 };

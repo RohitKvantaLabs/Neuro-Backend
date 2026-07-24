@@ -8,6 +8,8 @@ const {
   getAnalytics, getDashboard, getAuditLog,
   getInfraMongo, getInfraRedis, getInfraStorage,
   getTokens, getAgents,
+  listTickets, updateTicketStatus, ingestEmailTicket,
+  listHelpArticles, createHelpArticle, deleteHelpArticle,
 } = require('./admin.controller');
 const { requireAuth, requireAdmin } = require('../auth/auth.middleware');
 const { otpVerifyLimiter, loginLimiter } = require('../../middleware/rateLimiter');
@@ -17,6 +19,9 @@ const router = express.Router();
 // ── Public auth routes ───────────────────────────────────────────────────────
 router.post('/login', loginLimiter, login);
 router.post('/verify-login-otp', otpVerifyLimiter, verifyLoginOtp);
+
+// ── Email ingestion webhook (no auth — called by external email service) ─────
+router.post('/tickets/ingest', ingestEmailTicket);
 
 // ── All routes below require a valid admin access token ──────────────────────
 router.use(requireAuth, requireAdmin);
@@ -52,5 +57,14 @@ router.get('/infra/storage', getInfraStorage);
 // Token usage & Agent activity
 router.get('/tokens', getTokens);
 router.get('/agents', getAgents);
+
+// Help Desk — Tickets
+router.get('/tickets', listTickets);
+router.patch('/tickets/:id', updateTicketStatus);
+
+// Help Desk — Articles
+router.get('/articles', listHelpArticles);
+router.post('/articles', createHelpArticle);
+router.delete('/articles/:id', deleteHelpArticle);
 
 module.exports = router;
