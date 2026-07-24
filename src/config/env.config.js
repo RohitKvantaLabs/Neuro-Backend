@@ -51,6 +51,7 @@ module.exports = {
     baseUrl: process.env.PYTHON_AGENT_BASE_URL,
     internalSecret: process.env.PYTHON_AGENT_INTERNAL_SECRET,
     timeoutMs: parseInt(process.env.PYTHON_AGENT_TIMEOUT_MS, 10) || 65000,
+    model: process.env.AGENT_MODEL || 'unknown',
   },
 
   smtp: {
