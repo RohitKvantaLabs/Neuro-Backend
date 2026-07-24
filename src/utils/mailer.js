@@ -102,9 +102,9 @@ async function sendOtpEmail(to, otp, purpose) {
               <p style="font-size: 15px; font-weight: bold; color: #ffffff; margin-top: 0; margin-bottom: 15px;">Team NeuroSearch AI</p>
               
               <p style="font-size: 14px; color: #10b981; margin: 0;">
-                <a href="mailto:hello@neurosearch.com" style="color: #10b981; text-decoration: none;">hello@neurosearch.com</a>
+                <a href="mailto:rohit.paliwal@lifelancer.com" style="color: #10b981; text-decoration: none;">hello@neurosearch.com</a>
                 <span style="color: #475569; padding: 0 8px;">|</span>
-                <a href="https://www.neurosearch.com" style="color: #10b981; text-decoration: none;">www.neurosearch.com</a>
+                <a href="https://neuro-frontend-two.vercel.app" style="color: #10b981; text-decoration: none;">NeuroSearch AI</a>
               </p>
             </td>
           </tr>
@@ -114,7 +114,7 @@ async function sendOtpEmail(to, otp, purpose) {
         <table width="100%" max-width="500" border="0" cellspacing="0" cellpadding="0" style="max-width: 500px; margin-top: 20px;">
           <tr>
             <td align="center" style="font-size: 12px; color: #475569;">
-              This is an automated email from neurosearch.com. Please do not reply.
+              This is an automated email from NeuroSearch AI Platform. Please do not reply.
             </td>
           </tr>
         </table>
