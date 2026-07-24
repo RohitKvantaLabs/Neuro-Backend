@@ -7,6 +7,7 @@ const datasetRoutes = require('../modules/dataset/dataset.routes');
 const queryLogRoutes = require('../modules/queryLog/queryLog.routes');
 const { requireAuth } = require('../modules/auth/auth.middleware');
 const { requireOnboardingComplete } = require('../middleware/requireOnboardingComplete');
+const { listRepositories } = require('../modules/admin/admin.controller');
 
 const router = express.Router();
 
@@ -15,6 +16,9 @@ router.get('/health', (req, res) => res.json({ status: 'ok' }));
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
 router.use('/admin', adminRoutes);
+
+// §public — repository list for landing page; no auth required
+router.get('/repositories', listRepositories);
 
 // §10.2: Dataset search gated by auth + onboarding (per original §2 + §10.2)
 router.use('/datasets', requireAuth, requireOnboardingComplete, datasetRoutes);

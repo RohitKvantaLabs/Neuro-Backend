@@ -146,10 +146,15 @@ const createRepository = asyncHandler(async (req, res) => {
   const { name, trust_tier, endpoint_config } = req.body;
   if (!name) throw new ApiError(400, 'name is required.');
 
+  // ponytail: hard cap — keeps the frontend grid bounded at 10 cards
+  const count = await Repository.countDocuments();
+  if (count >= 10) throw new ApiError(400, 'Maximum 10 repositories allowed. Remove one before adding another.');
+
   const repo = await Repository.create({ name, trust_tier, endpoint_config });
   logAdminAction(req.user.id, 'repo.create', 'repository', repo._id.toString(), { name });
   return new ApiResponse(201, repo, 'Repository created.').send(res);
 });
+
 
 const deleteRepository = asyncHandler(async (req, res) => {
   const { id } = req.params;
