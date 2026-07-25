@@ -225,19 +225,26 @@ const updateMe = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user.id).select('+passwordHash');
   if (!user) throw new ApiError(404, 'User not found.');
 
-  if (value.phone && (value.countryCode !== user.countryCode || value.phone !== user.phone)) {
+  // Treat countryCode and phone as one identifier. Checking only when
+  // `phone` is supplied lets a country-code-only request evade the cap.
+  const nextCountryCode = value.countryCode ?? user.countryCode;
+  const nextPhone = value.phone ?? user.phone;
+  const phoneChanged = nextCountryCode !== user.countryCode || nextPhone !== user.phone;
+  if (phoneChanged) {
+    if (!nextCountryCode || !nextPhone) {
+      throw new ApiError(400, 'countryCode and phone must both be set before changing a phone number.');
+    }
     const phoneCount = await User.countDocuments({
-      countryCode: value.countryCode ?? user.countryCode,
-      phone: value.phone,
+      countryCode: nextCountryCode,
+      phone: nextPhone,
       _id: { $ne: user._id },
     });
     if (phoneCount >= 2) throw new ApiError(409, 'This phone number is already associated with the maximum number of accounts.');
-    if (value.countryCode !== undefined) user.countryCode = value.countryCode;
-    user.phone = value.phone;
+    user.countryCode = nextCountryCode;
+    user.phone = nextPhone;
   }
 
   if (value.name !== undefined) user.name = value.name;
-  if (value.role !== undefined) user.role = value.role;
   if (value.institute !== undefined) user.institute = value.institute;
 
   await user.save();

@@ -63,7 +63,6 @@ const completeOnboardingSchema = Joi.object({
 // §10.7 — PUT /users/me (all fields optional, phone cap enforced in controller)
 const updateMeSchema = Joi.object({
   name: Joi.string().trim().min(2).max(100),
-  role: Joi.string().valid(...ROLES),
   institute: Joi.string().trim().allow('', null),
   countryCode: countryCode.optional(),
   phone: phone.optional(),

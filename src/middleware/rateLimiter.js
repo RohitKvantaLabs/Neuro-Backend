@@ -62,4 +62,14 @@ const loginLimiter = rateLimit({
   message: { success: false, message: 'Too many login attempts. Try again in 15 minutes.' },
 });
 
-module.exports = { generalLimiter, searchLimiter, otpVerifyLimiter, resendOtpLimiter, passwordResetLimiter, loginLimiter };
+// Email webhooks should be low-volume. This limits retries/abuse even when
+// the provider credential is compromised.
+const ticketIngestLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many ticket ingestion requests. Please try again later.' },
+});
+
+module.exports = { generalLimiter, searchLimiter, otpVerifyLimiter, resendOtpLimiter, passwordResetLimiter, loginLimiter, ticketIngestLimiter };

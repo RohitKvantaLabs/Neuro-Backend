@@ -54,6 +54,10 @@ module.exports = {
     model: process.env.AGENT_MODEL || 'unknown',
   },
 
+  // Dedicated secret for the third-party email provider webhook. Leave it
+  // unset only if email ticket ingestion is intentionally disabled.
+  ticketIngestSecret: process.env.TICKET_INGEST_SECRET,
+
   smtp: {
     host: process.env.SMTP_HOST,
     port: parseInt(process.env.SMTP_PORT, 10) || 587,

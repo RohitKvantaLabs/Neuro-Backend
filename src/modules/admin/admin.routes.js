@@ -12,7 +12,8 @@ const {
   listHelpArticles, createHelpArticle, deleteHelpArticle,
 } = require('./admin.controller');
 const { requireAuth, requireAdmin } = require('../auth/auth.middleware');
-const { otpVerifyLimiter, loginLimiter } = require('../../middleware/rateLimiter');
+const { otpVerifyLimiter, loginLimiter, ticketIngestLimiter } = require('../../middleware/rateLimiter');
+const requireTicketIngestSecret = require('../../middleware/requireTicketIngestSecret');
 
 const router = express.Router();
 
@@ -21,7 +22,7 @@ router.post('/login', loginLimiter, login);
 router.post('/verify-login-otp', otpVerifyLimiter, verifyLoginOtp);
 
 // ── Email ingestion webhook (no auth — called by external email service) ─────
-router.post('/tickets/ingest', ingestEmailTicket);
+router.post('/tickets/ingest', ticketIngestLimiter, requireTicketIngestSecret, ingestEmailTicket);
 
 // ── All routes below require a valid admin access token ──────────────────────
 router.use(requireAuth, requireAdmin);
