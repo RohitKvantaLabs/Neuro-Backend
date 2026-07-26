@@ -9,10 +9,14 @@ const generalLimiter = rateLimit({
   message: { success: false, message: 'Too many requests, please try again later.' },
 });
 
-// Stricter limit for the search endpoint — a cache miss triggers a real LLM + Tavily call
+// Stricter limit for the search endpoint — a cache miss triggers a real LLM + Tavily call.
+// Keyed by authenticated user ID (requireAuth runs before this) because on Vercel
+// serverless multiple users may share a single edge IP, causing false positives.
 const searchLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  validate: { keyGeneratorIpFallback: false },
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many search requests - please slow down.' },

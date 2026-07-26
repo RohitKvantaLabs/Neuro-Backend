@@ -11,13 +11,17 @@ const upsertSocialLink = asyncHandler(async (req, res) => {
   if (!platform || !VALID_PLATFORMS.includes(platform)) throw new ApiError(400, `platform must be one of: ${VALID_PLATFORMS.join(', ')}.`);
   if (!url) throw new ApiError(400, 'url is required.');
 
-  // Basic URL validation — ponytail: native URL constructor is enough here
-  try { new URL(url); } catch { throw new ApiError(400, 'url must be a valid URL.'); }
+  // URL validation — reject non-http(s) schemes (prevents javascript:/data: URIs)
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new ApiError(400, 'url must be a valid URL.'); }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new ApiError(400, 'URL must use http or https scheme.');
+  }
 
   const link = await SocialLink.findOneAndUpdate(
     { userId: req.user.id, platform },
     { url },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
+    { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
   );
   return new ApiResponse(200, link, 'Social link saved.').send(res);
 });

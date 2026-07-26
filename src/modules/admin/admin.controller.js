@@ -102,8 +102,9 @@ const deleteUser = asyncHandler(async (req, res) => {
     SocialLink.deleteMany({ userId: id }),
   ]);
 
-  // ponytail: fire-and-forget, never blocks response
-  logAdminAction(req.user.id, 'user.delete', 'user', id);
+  // Blocking audit log — ensures the action is recorded even if a subsequent request
+  // clears logs before the fire-and-forget promise resolves.
+  await logAdminAction(req.user.id, 'user.delete', 'user', id).catch(() => {});
 
   return new ApiResponse(200, null, 'User deleted.').send(res);
 });
@@ -119,11 +120,13 @@ const getAdmins = asyncHandler(async (req, res) => {
 
 const listDatasets = asyncHandler(async (req, res) => {
   const { trust_tier: trustTier, page = 1, limit = 50 } = req.query;
+  const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 500);
+  const safePage = Math.max(Number(page) || 1, 1);
   const filter = trustTier ? { trust_tier: trustTier } : {};
   const datasets = await Dataset.find(filter)
     .sort({ updated_at: -1 })
-    .skip((page - 1) * limit)
-    .limit(Number(limit));
+    .skip((safePage - 1) * safeLimit)
+    .limit(safeLimit);
   return new ApiResponse(200, datasets).send(res);
 });
 

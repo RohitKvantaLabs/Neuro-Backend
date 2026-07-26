@@ -42,7 +42,9 @@ module.exports = {
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   },
 
-  frontendOrigins: (process.env.FRONTEND_ORIGIN || 'https://neuro-frontend-two.vercel.app')
+  // Default to localhost for new deployments — never default to a production URL
+  // that could silently whitelist the wrong origin in a development/staging env.
+  frontendOrigins: (process.env.FRONTEND_ORIGIN || 'http://localhost:5173')
     .split(',')
     .map((origin) => origin.trim().replace(/\/$/, ''))
     .filter(Boolean),

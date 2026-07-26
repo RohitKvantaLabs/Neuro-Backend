@@ -2,11 +2,11 @@ const mongoose = require('mongoose');
 const logger = require('../utils/logger');
 const env = require('./env.config');
 
-let isConnected = false;
-
 async function connectDB() {
-  if (isConnected || mongoose.connection.readyState === 1) {
-    isConnected = true;
+  // Rely on mongoose.connection.readyState instead of an in-memory flag so that
+  // a dropped connection (readyState 0) is automatically re-established on the
+  // next call rather than being skipped due to a stale isConnected = true.
+  if (mongoose.connection.readyState === 1 || mongoose.connection.readyState === 2) {
     return;
   }
 
@@ -15,7 +15,6 @@ async function connectDB() {
       dbName: env.mongoDbName,
       serverSelectionTimeoutMS: 5000,
     });
-    isConnected = db.connections[0].readyState === 1;
     logger.info(`MongoDB connected -> db=${env.mongoDbName}`);
   } catch (err) {
     logger.error(`MongoDB connection failed: ${err.message}`);

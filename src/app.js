@@ -32,9 +32,17 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// 3. Sanitization - ponytail: Express 5 makes req.query a getter (non-writable),
-// so mongoSanitize() middleware crashes on reassignment. Sanitize body in-place instead.
-app.use((req, res, next) => { mongoSanitize.sanitize(req.body); next(); });
+// 3. Sanitization — strip $ and . from MongoDB query operators to prevent
+// NoSQL injection via req.body and req.query.  req.params are sanitised by
+// each controller that passes them to MongoDB (cast to ObjectId).
+// ponytail: Express 5 makes req.query a getter (non-writable), so
+// mongoSanitize.sanitize() mutates the returned object in-place, which is
+// sufficient to strip operator keys before they reach any route handler.
+app.use((req, res, next) => {
+  mongoSanitize.sanitize(req.body);
+  if (req.query) mongoSanitize.sanitize(req.query);
+  next();
+});
 
 // 4. Logging + rate limiting
 app.use(requestLogger);

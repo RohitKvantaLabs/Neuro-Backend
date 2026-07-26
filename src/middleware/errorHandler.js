@@ -13,7 +13,7 @@ function errorHandler(err, req, res, next) {
     return res.status(409).json({ success: false, message: 'A record with that value already exists.' });
   }
 
-  const statusCode = err.statusCode || (err.isApiError ? err.statusCode : 500);
+  const statusCode = (err.statusCode && err.statusCode >= 100) ? err.statusCode : 500;
   const message = err.message || 'Internal server error';
 
   if (statusCode >= 500) {

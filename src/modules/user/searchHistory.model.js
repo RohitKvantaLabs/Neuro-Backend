@@ -11,23 +11,24 @@ const searchHistorySchema = new mongoose.Schema(
 // §10.5: matches frontend's search_history_user_created_idx
 searchHistorySchema.index({ userId: 1, createdAt: -1 });
 
-// ponytail: replace find+sort+skip hook (3 ops/search) with count+conditional-delete.
-// Only queries once per save; skips the delete entirely when under the cap.
+// §10.5: Enforce a 30-entry cap per user. Uses ObjectId ordering (monotonically
+// increasing per process) instead of createdAt to narrow the race window between
+// the find and the delete.  A single findOne + deleteMany is still non-atomic,
+// but using _id guarantees strict ordering (createdAt can have ties at ms
+// precision).
 searchHistorySchema.post('save', async function () {
   const Model = mongoose.model('SearchHistory');
-  const count = await Model.countDocuments({ userId: this.userId });
-  if (count > 30) {
-    // Find the 30th-newest entry's createdAt and delete anything older.
-    const [cutoff] = await Model
-      .find({ userId: this.userId })
-      .sort({ createdAt: -1 })
-      .skip(29)
-      .limit(1)
-      .select('createdAt')
-      .lean();
-    if (cutoff) {
-      await Model.deleteMany({ userId: this.userId, createdAt: { $lte: cutoff.createdAt, $ne: cutoff.createdAt } });
-    }
+  // Find the _id of the 30th-newest entry; ObjectId embeds a timestamp
+  // and orders strictly by insertion.
+  const cutoff = await Model
+    .findOne({ userId: this.userId })
+    .sort({ _id: -1 })
+    .skip(29)
+    .select('_id')
+    .lean();
+  if (cutoff) {
+    // Atomic single-query delete — every document with _id older than cutoff
+    await Model.deleteMany({ userId: this.userId, _id: { $lt: cutoff._id } });
   }
 });
 

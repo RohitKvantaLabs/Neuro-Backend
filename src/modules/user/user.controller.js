@@ -146,6 +146,13 @@ const refresh = asyncHandler(async (req, res) => {
   const token = req.cookies?.[REFRESH_COOKIE_NAME];
   if (!token) throw new ApiError(401, 'No refresh token provided.');
 
+  // Reject blacklisted (logged-out) tokens
+  const { isTokenBlacklisted } = require('../../utils/tokenBlacklist');
+  if (isTokenBlacklisted(token)) {
+    res.clearCookie(REFRESH_COOKIE_NAME, { path: '/api/v1/auth' });
+    throw new ApiError(401, 'Session has been invalidated. Please log in again.');
+  }
+
   let decoded;
   try {
     decoded = verifyRefreshToken(token);
@@ -158,6 +165,12 @@ const refresh = asyncHandler(async (req, res) => {
 });
 
 const logout = asyncHandler(async (req, res) => {
+  // Server-side token invalidation — prevents stolen refresh tokens from being reused
+  const token = req.cookies?.[REFRESH_COOKIE_NAME];
+  if (token) {
+    const { addToTokenBlacklist } = require('../../utils/tokenBlacklist');
+    addToTokenBlacklist(token);
+  }
   res.clearCookie(REFRESH_COOKIE_NAME, { path: '/api/v1/auth' });
   return new ApiResponse(200, null, 'Logged out.').send(res);
 });
@@ -225,7 +238,7 @@ const updateMe = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user.id).select('+passwordHash');
   if (!user) throw new ApiError(404, 'User not found.');
 
-  // Treat countryCode and phone as one identifier. Checking only when
+ // Treat countryCode and phone as one identifier. Checking only when
   // `phone` is supplied lets a country-code-only request evade the cap.
   const nextCountryCode = value.countryCode ?? user.countryCode;
   const nextPhone = value.phone ?? user.phone;
@@ -375,9 +388,31 @@ const resetPassword = asyncHandler(async (req, res) => {
   return new ApiResponse(200, null, 'Password reset successfully. Please log in with your new password.').send(res);
 });
 
-// §10.8 — DELETE /users/me (hard delete + cascade, no re-auth required)
+// §10.8 — DELETE /users/me (hard delete + cascade, requires password re-auth)
 const deleteAccount = asyncHandler(async (req, res) => {
   const userId = req.user.id;
+  const { password } = req.body;
+
+  const user = await User.findById(userId).select('+passwordHash');
+  if (!user) throw new ApiError(404, 'User not found.');
+
+  // Require password re-authentication for account deletion
+  if (user.authProvider === 'local') {
+    if (!password) throw new ApiError(400, 'Password is required to delete your account.');
+    const valid = await user.comparePassword(password);
+    if (!valid) throw new ApiError(401, 'Invalid password.');
+  }
+  // Google-authenticated accounts require re-verification of the Google ID token
+  if (user.authProvider === 'google') {
+    const { idToken } = req.body;
+    if (!idToken) throw new ApiError(400, 'Google ID token is required to delete your account.');
+    try {
+      const { email: verifiedEmail } = await verifyGoogleIdToken(idToken);
+      if (verifiedEmail !== user.email) throw new Error();
+    } catch {
+      throw new ApiError(401, 'Invalid Google ID token. Please re-authenticate with Google.');
+    }
+  }
 
   const Collection = require('./collection.model');
   const CollectionItem = require('./collectionItem.model');
@@ -395,6 +430,11 @@ const deleteAccount = asyncHandler(async (req, res) => {
     SearchHistory.deleteMany({ userId }),
     SocialLink.deleteMany({ userId }),
   ]);
+
+  // Invalidate refresh token server-side
+  const { addToTokenBlacklist } = require('../../utils/tokenBlacklist');
+  const token = req.cookies?.[REFRESH_COOKIE_NAME];
+  if (token) addToTokenBlacklist(token);
 
   res.clearCookie(REFRESH_COOKIE_NAME, { path: '/api/v1/auth' });
   return new ApiResponse(200, null, 'Account deleted.').send(res);
