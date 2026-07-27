@@ -4,10 +4,19 @@ const env = require('../../config/env.config');
 const logger = require('../../utils/logger');
 const TokenUsage = require('../admin/tokenUsage.model');
 const AgentLog = require('../admin/agentLog.model');
+const { CircuitBreaker } = require('../../utils/circuitBreaker');
 
 // ponytail: in-process query-parse cache — same query within 5 min skips LLM entirely.
 const _parseCache = new Map(); // key: query string, value: { filters, expiresAt }
 const PARSE_CACHE_TTL_MS = 5 * 60 * 1000;
+
+// Circuit breaker for Python agent calls — 5 failures within 30s opens
+// for 30s of fast-fail, preventing cascading waits when the Python side
+// is slow or down.
+const _pythonAgentCB = new CircuitBreaker('python-agents', {
+  failureThreshold: 5,
+  recoveryTimeoutMs: 30_000,
+});
 
 /**
  * The only place in this codebase that calls the Python agent service.
@@ -45,7 +54,11 @@ async function parseQuery(query, userId = null, userEmail = 'anonymous') {
 
   const start = Date.now();
   try {
-    const { data } = await client.post('/agents/parse-query', { query });
+    // Circuit breaker wraps the actual HTTP call — if Python is down/slow,
+    // we fast-fail instead of blocking for the full timeout.
+    const { data } = await _pythonAgentCB.wrap(
+      () => client.post('/agents/parse-query', { query })
+    )();
     const filters = data?.filters && typeof data.filters === 'object' ? data.filters : {};
 
     const result = {
@@ -118,11 +131,13 @@ async function parseQuery(query, userId = null, userEmail = 'anonymous') {
 async function runFallbackSearch({ query, filters, userId, userEmail }) {
   const start = Date.now();
   try {
-    const { data } = await client.post('/agents/fallback-search', {
+    const { data } = await _pythonAgentCB.wrap(
+      () => client.post('/agents/fallback-search', {
       query_id: crypto.randomUUID(),
       query,
       filters,
-    });
+      })
+    )();
     const duration = Date.now() - start;
     const tokens = estimateTokens(query) + estimateTokens(JSON.stringify(filters || {}));
 

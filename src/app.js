@@ -1,5 +1,6 @@
 const express = require('express');
 const helmet = require('helmet');
+const compression = require('compression');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const mongoSanitize = require('express-mongo-sanitize');
@@ -26,6 +27,21 @@ app.use(cors({
     return callback(new Error(`CORS origin not allowed: ${origin}`));
   },
   credentials: true,
+}));
+
+// 1b. Response compression — gzip/brotli for JSON and text responses >= 1 KB.
+// The middleware checks Content-Encoding to avoid double-compressing already-
+// compressed payloads (e.g. when Vercel Edge or a CDN compresses upstream).
+app.use(compression({
+  // Only compress responses above this threshold (1 KB) — tiny responses
+  // (health checks, 204s, redirects) don't benefit from compression.
+  threshold: 1024,
+  // Skip responses that are already compressed.
+  filter: (req, res) => {
+    if (res.getHeader('Content-Encoding')) return false;
+    // fall back to compression's default filter (content-type sniffing)
+    return compression.filter(req, res);
+  },
 }));
 
 // 2. Parsers

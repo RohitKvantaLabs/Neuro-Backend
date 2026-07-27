@@ -6,6 +6,13 @@ const QueryLog = require('../queryLog/queryLog.model');
 const ApiError = require('../../utils/ApiError');
 const ApiResponse = require('../../utils/ApiResponse');
 const asyncHandler = require('../../utils/asyncHandler');
+const { TtlCache } = require('../../utils/ttlCache');
+
+// In-memory cache for the public /repositories endpoint.
+// Repository listing rarely changes (admin CRUD only) and is identical
+// for every user — no reason to hit Mongo on every landing page load.
+const _reposCache = new TtlCache({ ttlMs: 300_000 }); // 5 minutes
+const REPOS_CACHE_KEY = 'repos';
 const { adminLoginSchema, verifyLoginOtpSchema } = require('./admin.validation');
 const { OTP_PURPOSES, generateOtp, hashOtp, compareOtp } = require('../../utils/otp.util');
 const { sendOtpEmail } = require('../../utils/mailer');
@@ -167,7 +174,11 @@ const deleteDataset = asyncHandler(async (req, res) => {
 // ─── Repositories (§11.1) ─────────────────────────────────────────────────────
 
 const listRepositories = asyncHandler(async (req, res) => {
-  const repos = await Repository.find().sort({ createdAt: -1 });
+  const repos = await _reposCache.getOrSet(REPOS_CACHE_KEY, () =>
+    Repository.find().sort({ createdAt: -1 })
+  );
+  // Cache at Vercel edge for 5 min; allow serving stale for 1 min while revalidating
+  res.set('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=60');
   return new ApiResponse(200, repos).send(res);
 });
 
@@ -180,6 +191,7 @@ const createRepository = asyncHandler(async (req, res) => {
   if (count >= 10) throw new ApiError(400, 'Maximum 10 repositories allowed. Remove one before adding another.');
 
   const repo = await Repository.create({ name, trust_tier, endpoint_config });
+  _reposCache.delete(REPOS_CACHE_KEY);
   logAdminAction(req.user.id, 'repo.create', 'repository', repo._id.toString(), { name });
   return new ApiResponse(201, repo, 'Repository created.').send(res);
 });
@@ -189,6 +201,7 @@ const deleteRepository = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const repo = await Repository.findByIdAndDelete(id);
   if (!repo) throw new ApiError(404, 'Repository not found.');
+  _reposCache.delete(REPOS_CACHE_KEY);
   logAdminAction(req.user.id, 'repo.delete', 'repository', id, { name: repo.name });
   return new ApiResponse(200, null, 'Repository deleted.').send(res);
 });
@@ -198,6 +211,7 @@ const resyncRepository = asyncHandler(async (req, res) => {
   // ponytail: only flips the flag — real trigger to Python is a follow-up (§11.1)
   const repo = await Repository.findByIdAndUpdate(id, { sync_status: 'syncing' }, { new: true });
   if (!repo) throw new ApiError(404, 'Repository not found.');
+  _reposCache.delete(REPOS_CACHE_KEY);
   logAdminAction(req.user.id, 'repo.resync', 'repository', id, { name: repo.name });
   return new ApiResponse(200, repo, 'Resync initiated.').send(res);
 });
