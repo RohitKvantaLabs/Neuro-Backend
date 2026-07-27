@@ -15,6 +15,9 @@ const userSchema = new mongoose.Schema(
       // required only for local auth — validated via pre-validate hook below
     },
     isActive: { type: Boolean, default: true },
+    isDeleted: { type: Boolean, default: false },
+    deletionRequestedAt: { type: Date, default: null },
+    scheduledDeletionAt: { type: Date, default: null },
     isEmailVerified: { type: Boolean, default: false },
     phone: { type: String, default: null },
     countryCode: { type: String, default: null }, // E.164 prefix e.g. "+91" — stored separately from digits

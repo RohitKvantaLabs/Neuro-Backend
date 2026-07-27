@@ -130,8 +130,32 @@ const login = asyncHandler(async (req, res) => {
   if (error) throw new ApiError(400, error.details[0].message);
 
   const user = await User.findOne({ email: value.email }).select('+passwordHash');
-  if (!user || !user.isActive) throw new ApiError(401, 'Invalid email or password.');
+  if (!user) throw new ApiError(401, 'Invalid email or password.');
   if (user.authProvider !== 'local') throw new ApiError(401, 'This account uses Google Sign-In. Please log in with Google.');
+
+  // Handle soft-deleted accounts in 30-day grace period vs expired
+  if (user.isDeleted) {
+    const now = new Date();
+    if (user.scheduledDeletionAt && new Date(user.scheduledDeletionAt) > now) {
+      // Inside grace period — restore account upon valid password check
+      const valid = await user.comparePassword(value.password);
+      if (!valid) throw new ApiError(401, 'Invalid email or password.');
+      if (!user.isEmailVerified) throw new ApiError(403, 'Please verify your email before logging in.');
+
+      user.isDeleted = false;
+      user.isActive = true;
+      user.deletionRequestedAt = null;
+      user.scheduledDeletionAt = null;
+      await user.save();
+
+      const tokenData = issueFullTokens(res, user);
+      return new ApiResponse(200, { ...tokenData, isOnboarded: user.isOnboarded, isRestored: true }, 'Account deletion cancelled. Welcome back!').send(res);
+    } else {
+      throw new ApiError(401, 'This account has been permanently deleted.');
+    }
+  }
+
+  if (!user.isActive) throw new ApiError(401, 'Invalid email or password.');
 
   const valid = await user.comparePassword(value.password);
   if (!valid) throw new ApiError(401, 'Invalid email or password.');
@@ -223,6 +247,9 @@ const getMe = asyncHandler(async (req, res) => {
     institute: user.institute,
     isOnboarded: user.isOnboarded,
     isLegacyUser: user.isLegacyUser,
+    isDeleted: user.isDeleted || false,
+    deletionRequestedAt: user.deletionRequestedAt || null,
+    scheduledDeletionAt: user.scheduledDeletionAt || null,
     notificationsEnabled: user.notificationsEnabled,
     notificationPreferences,
     isAdmin: false,
@@ -388,24 +415,26 @@ const resetPassword = asyncHandler(async (req, res) => {
   return new ApiResponse(200, null, 'Password reset successfully. Please log in with your new password.').send(res);
 });
 
-// §10.8 — DELETE /users/me (hard delete + cascade, requires password re-auth)
+// §10.8 — DELETE /users/me (soft delete with 30-day grace period, session revocation, requires DELETE confirmation)
 const deleteAccount = asyncHandler(async (req, res) => {
   const userId = req.user.id;
-  const { password } = req.body;
+  const { confirmation, password } = req.body;
+
+  if (confirmation !== 'DELETE') {
+    throw new ApiError(400, "Validation failed: You must type 'DELETE' to confirm account deletion.");
+  }
 
   const user = await User.findById(userId).select('+passwordHash');
   if (!user) throw new ApiError(404, 'User not found.');
 
-  // Require password re-authentication for account deletion
-  if (user.authProvider === 'local') {
-    if (!password) throw new ApiError(400, 'Password is required to delete your account.');
+  // Require password re-authentication for local accounts if password is provided
+  if (user.authProvider === 'local' && password) {
     const valid = await user.comparePassword(password);
     if (!valid) throw new ApiError(401, 'Invalid password.');
   }
   // Google-authenticated accounts require re-verification of the Google ID token
-  if (user.authProvider === 'google') {
+  if (user.authProvider === 'google' && req.body.idToken) {
     const { idToken } = req.body;
-    if (!idToken) throw new ApiError(400, 'Google ID token is required to delete your account.');
     try {
       const { email: verifiedEmail } = await verifyGoogleIdToken(idToken);
       if (verifiedEmail !== user.email) throw new Error();
@@ -414,30 +443,50 @@ const deleteAccount = asyncHandler(async (req, res) => {
     }
   }
 
-  const Collection = require('./collection.model');
-  const CollectionItem = require('./collectionItem.model');
-  const SavedDataset = require('./savedDataset.model');
-  const SearchHistory = require('./searchHistory.model');
-  const SocialLink = require('./socialLink.model');
+  const now = new Date();
+  const gracePeriodMs = 30 * 24 * 60 * 60 * 1000;
+  const scheduledDate = new Date(now.getTime() + gracePeriodMs);
 
-  const collectionIds = await Collection.find({ userId }).distinct('_id');
-
-  await Promise.all([
-    User.findByIdAndDelete(userId),
-    SavedDataset.deleteMany({ userId }),
-    Collection.deleteMany({ userId }),
-    CollectionItem.deleteMany({ collectionId: { $in: collectionIds } }),
-    SearchHistory.deleteMany({ userId }),
-    SocialLink.deleteMany({ userId }),
-  ]);
+  user.isDeleted = true;
+  user.isActive = false;
+  user.deletionRequestedAt = now;
+  user.scheduledDeletionAt = scheduledDate;
+  await user.save();
 
   // Invalidate refresh token server-side
   const { addToTokenBlacklist } = require('../../utils/tokenBlacklist');
   const token = req.cookies?.[REFRESH_COOKIE_NAME];
   if (token) addToTokenBlacklist(token);
 
-  res.clearCookie(REFRESH_COOKIE_NAME, { path: '/api/v1/auth' });
-  return new ApiResponse(200, null, 'Account deleted.').send(res);
+  res.clearCookie(REFRESH_COOKIE_NAME, REFRESH_COOKIE_OPTIONS);
+  return new ApiResponse(
+    200,
+    {
+      isDeleted: true,
+      scheduledDeletionAt: scheduledDate,
+      gracePeriodDays: 30,
+    },
+    'Account scheduled for deletion with a 30-day grace period. Active sessions revoked.'
+  ).send(res);
+});
+
+// POST /users/cancel-deletion — restore account during 30-day grace period
+const cancelDeletion = asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const user = await User.findById(userId);
+  if (!user) throw new ApiError(404, 'User not found.');
+
+  if (!user.isDeleted) {
+    return new ApiResponse(200, { isDeleted: false }, 'Account is already active.').send(res);
+  }
+
+  user.isDeleted = false;
+  user.isActive = true;
+  user.deletionRequestedAt = null;
+  user.scheduledDeletionAt = null;
+  await user.save();
+
+  return new ApiResponse(200, { isDeleted: false }, 'Account deletion cancelled. Your account has been restored.').send(res);
 });
 
 // ponytail: keep getProfile alias for the /auth/me route
@@ -449,5 +498,5 @@ module.exports = {
   verifyOtp, resendOtp,
   forgotPassword, resetPassword,
   completeOnboarding, googleLogin,
-  deleteAccount,
+  deleteAccount, cancelDeletion,
 };

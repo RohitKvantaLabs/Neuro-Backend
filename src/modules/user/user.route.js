@@ -1,7 +1,7 @@
 const express = require('express');
 const { requireAuth } = require('../auth/auth.middleware');
 const { requireOnboardingComplete } = require('../../middleware/requireOnboardingComplete');
-const { getMe, updateMe, updateNotifications, deleteAccount } = require('./user.controller');
+const { getMe, updateMe, updateNotifications, deleteAccount, cancelDeletion } = require('./user.controller');
 
 const savedDatasetRoutes = require('./savedDataset.routes');
 const collectionRoutes = require('./collection.routes');
@@ -18,8 +18,9 @@ router.get('/me', getMe);
 router.put('/me', requireOnboardingComplete, updateMe);
 router.patch('/me/notifications', requireOnboardingComplete, updateNotifications);
 
-// §10.8: DELETE /users/me — hard cascade delete
+// §10.8: DELETE /users/me — soft delete with 30-day grace period
 router.delete('/me', deleteAccount);
+router.post('/cancel-deletion', cancelDeletion);
 
 // §10.3–10.6: Dashboard-facing sub-routes — all gated behind onboarding
 router.use('/saved-datasets', requireOnboardingComplete, savedDatasetRoutes);
