@@ -116,6 +116,32 @@ const getAdmins = asyncHandler(async (req, res) => {
   return new ApiResponse(200, admins).send(res);
 });
 
+// ─── Update admin profile (name only) ────────────────────────────────────────
+
+const updateAdminProfile = asyncHandler(async (req, res) => {
+  const { name } = req.body;
+
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    throw new ApiError(400, 'Name is required and must be a non-empty string.');
+  }
+
+  const trimmed = name.trim();
+  if (trimmed.length < 2 || trimmed.length > 100) {
+    throw new ApiError(400, 'Name must be between 2 and 100 characters.');
+  }
+
+  const admin = await Admin.findByIdAndUpdate(
+    req.user.id,
+    { name: trimmed },
+    { new: true, select: 'name email createdAt' }
+  );
+
+  if (!admin) throw new ApiError(404, 'Admin not found.');
+
+  logAdminAction(req.user.id, 'admin.profile.update', 'admin', req.user.id, { name: trimmed });
+  return new ApiResponse(200, admin, 'Profile updated.').send(res);
+});
+
 // ─── Datasets ────────────────────────────────────────────────────────────────
 
 const listDatasets = asyncHandler(async (req, res) => {
@@ -554,7 +580,7 @@ const deleteHelpArticle = asyncHandler(async (req, res) => {
 
 module.exports = {
   login, verifyLoginOtp,
-  getAdmins,
+  getAdmins, updateAdminProfile,
   listUsers, deleteUser,
   listDatasets, deleteDataset,
   listRepositories, createRepository, deleteRepository, resyncRepository,

@@ -1,7 +1,7 @@
 const express = require('express');
 const {
   login, verifyLoginOtp,
-  getAdmins,
+  getAdmins, updateAdminProfile,
   listUsers, deleteUser,
   listDatasets, deleteDataset,
   listRepositories, createRepository, deleteRepository, resyncRepository,
@@ -44,6 +44,7 @@ router.post('/repositories/:id/resync', resyncRepository);
 
 // Admin accounts
 router.get('/admins', getAdmins);
+router.patch('/profile', updateAdminProfile);
 
 // Analytics, Dashboard, Audit log (§11.5, §11.8, §11.6)
 router.get('/analytics', getAnalytics);
