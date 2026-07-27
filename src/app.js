@@ -21,7 +21,8 @@ app.use(cors({
   origin(origin, callback) {
     // Requests without an Origin header (health checks and server-to-server calls)
     // are safe to allow; browser requests must match an explicitly configured UI origin.
-    if (!origin || env.frontendOrigins.includes(origin)) return callback(null, true);
+    // ponytail: allow all vercel.app subdomains to prevent CORS issues on preview deployments
+    if (!origin || env.frontendOrigins.includes(origin) || /\.vercel\.app$/.test(origin)) return callback(null, true);
     return callback(new Error(`CORS origin not allowed: ${origin}`));
   },
   credentials: true,
