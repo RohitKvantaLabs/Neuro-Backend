@@ -86,6 +86,7 @@ const register = asyncHandler(async (req, res) => {
 });
 
 const verifyOtp = asyncHandler(async (req, res) => {
+  if (req.body.otp) req.body.otp = req.body.otp.replace(/\s+/g, '');
   const { error, value } = verifyOtpSchema.validate(req.body);
   if (error) throw new ApiError(400, error.details[0].message);
 
@@ -391,6 +392,7 @@ const forgotPassword = asyncHandler(async (req, res) => {
 });
 
 const resetPassword = asyncHandler(async (req, res) => {
+  if (req.body.otp) req.body.otp = req.body.otp.replace(/\s+/g, '');
   const { error, value } = resetPasswordSchema.validate(req.body);
   if (error) throw new ApiError(400, error.details[0].message);
 

@@ -26,6 +26,26 @@ const HelpArticle = require('./helpArticle.model');
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
+// Resend admin login OTP (reuses resendOtpLimiter on the route)
+const resendLoginOtp = asyncHandler(async (req, res) => {
+  const { email } = req.body;
+  if (!email) throw new ApiError(400, 'Email is required.');
+
+  const admin = await Admin.findOne({ email });
+  if (!admin) {
+    return new ApiResponse(200, null, 'If an admin account exists, a new code has been sent.').send(res);
+  }
+
+  const otp = generateOtp();
+  admin.otp = await hashOtp(otp);
+  admin.otpExpires = new Date(Date.now() + env.otp.adminExpiryMinutes * 60 * 1000);
+  admin.otpPurpose = OTP_PURPOSES.LOGIN_2FA;
+  await admin.save();
+  await sendOtpEmail(admin.email, otp, OTP_PURPOSES.LOGIN_2FA);
+
+  return new ApiResponse(200, null, 'A new verification code has been sent to your email.').send(res);
+});
+
 // Step 1: verify password, issue OTP (do NOT issue tokens yet)
 const login = asyncHandler(async (req, res) => {
   const { error, value } = adminLoginSchema.validate(req.body);
@@ -49,6 +69,7 @@ const login = asyncHandler(async (req, res) => {
 
 // Step 2: verify OTP, issue tokens
 const verifyLoginOtp = asyncHandler(async (req, res) => {
+  if (req.body.otp) req.body.otp = req.body.otp.replace(/\s+/g, '');
   const { error, value } = verifyLoginOtpSchema.validate(req.body);
   if (error) throw new ApiError(400, error.details[0].message);
 
@@ -593,7 +614,7 @@ const deleteHelpArticle = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  login, verifyLoginOtp,
+  login, verifyLoginOtp, resendLoginOtp,
   getAdmins, updateAdminProfile,
   listUsers, deleteUser,
   listDatasets, deleteDataset,

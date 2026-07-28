@@ -1,6 +1,6 @@
 const express = require('express');
 const {
-  login, verifyLoginOtp,
+  login, verifyLoginOtp, resendLoginOtp,
   getAdmins, updateAdminProfile,
   listUsers, deleteUser,
   listDatasets, deleteDataset,
@@ -12,7 +12,7 @@ const {
   listHelpArticles, createHelpArticle, deleteHelpArticle,
 } = require('./admin.controller');
 const { requireAuth, requireAdmin } = require('../auth/auth.middleware');
-const { otpVerifyLimiter, loginLimiter, ticketIngestLimiter } = require('../../middleware/rateLimiter');
+const { otpVerifyLimiter, resendOtpLimiter, loginLimiter, ticketIngestLimiter } = require('../../middleware/rateLimiter');
 const requireTicketIngestSecret = require('../../middleware/requireTicketIngestSecret');
 
 const router = express.Router();
@@ -20,6 +20,7 @@ const router = express.Router();
 // ── Public auth routes ───────────────────────────────────────────────────────
 router.post('/login', loginLimiter, login);
 router.post('/verify-login-otp', otpVerifyLimiter, verifyLoginOtp);
+router.post('/resend-login-otp', resendOtpLimiter, resendLoginOtp);
 
 // ── Email ingestion webhook (no auth — called by external email service) ─────
 router.post('/tickets/ingest', ticketIngestLimiter, requireTicketIngestSecret, ingestEmailTicket);
