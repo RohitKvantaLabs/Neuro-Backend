@@ -70,4 +70,19 @@ router.get('/articles', listHelpArticles);
 router.post('/articles', createHelpArticle);
 router.delete('/articles/:id', deleteHelpArticle);
 
+// Announcements
+const {
+  listAllAnnouncements,
+  createAnnouncement,
+  updateAnnouncement,
+  toggleAnnouncement,
+  deleteAnnouncement,
+} = require('../announcement/announcement.controller');
+
+router.get('/announcements', listAllAnnouncements);
+router.post('/announcements', createAnnouncement);
+router.patch('/announcements/:id/toggle', toggleAnnouncement);
+router.patch('/announcements/:id', updateAnnouncement);
+router.delete('/announcements/:id', deleteAnnouncement);
+
 module.exports = router;

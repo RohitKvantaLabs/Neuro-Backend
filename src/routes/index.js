@@ -9,6 +9,8 @@ const { requireAuth } = require('../modules/auth/auth.middleware');
 const { requireOnboardingComplete } = require('../middleware/requireOnboardingComplete');
 const { listRepositories } = require('../modules/admin/admin.controller');
 
+const announcementRoutes = require('../modules/announcement/announcement.routes');
+
 const router = express.Router();
 
 router.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -16,6 +18,7 @@ router.get('/health', (req, res) => res.json({ status: 'ok' }));
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
 router.use('/admin', adminRoutes);
+router.use('/announcements', announcementRoutes);
 
 // §public — repository list for landing page; no auth required
 router.get('/repositories', listRepositories);
