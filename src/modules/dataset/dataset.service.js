@@ -10,13 +10,52 @@ function buildMongoQuery(filters = {}) {
   const normalizedFilters = filters && typeof filters === 'object' ? filters : {};
   const query = {};
 
-  if (normalizedFilters.modality?.length) query.modality = { $in: normalizedFilters.modality };
-  if (normalizedFilters.species?.length) query.species = { $in: normalizedFilters.species };
-  if (normalizedFilters.condition?.length) query.keywords = { $in: normalizedFilters.condition }; // condition isn't a stored field yet - matched via keywords for now
-  if (normalizedFilters.task) query.keywords = { ...(query.keywords || {}), $in: [...(query.keywords?.$in || []), normalizedFilters.task] };
-  if (normalizedFilters.format?.length) query.keywords = { $in: [...(query.keywords?.$in || []), ...normalizedFilters.format] };
+  const toRegexArray = (arr) => {
+    if (!arr) return [];
+    const list = Array.isArray(arr) ? arr : [arr];
+    return list.map((item) => new RegExp(`^${item.trim()}$`, 'i'));
+  };
 
-  // ponytail: use $text index instead of unanchored regex — no full collection scan.
+  const modalities = toRegexArray(normalizedFilters.modality);
+  if (modalities.length) query.modality = { $in: modalities };
+
+  const species = toRegexArray(normalizedFilters.species);
+  if (species.length) query.species = { $in: species };
+
+  const diseases = toRegexArray(normalizedFilters.disease || normalizedFilters.condition);
+  if (diseases.length) {
+    query.$or = query.$or || [];
+    query.$or.push({ disease: { $in: diseases } }, { keywords: { $in: diseases } });
+  }
+
+  const tasks = toRegexArray(normalizedFilters.task);
+  if (tasks.length) {
+    query.keywords = query.keywords || {};
+    query.keywords.$in = [...(query.keywords.$in || []), ...tasks];
+  }
+
+  const formats = toRegexArray(normalizedFilters.format);
+  if (formats.length) {
+    query.keywords = query.keywords || {};
+    query.keywords.$in = [...(query.keywords.$in || []), ...formats];
+  }
+
+  const repos = toRegexArray(normalizedFilters.repository);
+  if (repos.length) {
+    query.source = { $in: repos };
+  }
+
+  const ageGroups = toRegexArray(normalizedFilters.age_group || normalizedFilters.ageGroup);
+  if (ageGroups.length) {
+    query.age_group = { $in: ageGroups };
+  }
+
+  const availabilities = toRegexArray(normalizedFilters.availability || normalizedFilters.access_tier);
+  if (availabilities.length) {
+    query.access_tier = { $in: availabilities };
+  }
+
+  // Use $text index for raw_query if no structured fields match
   if (Object.keys(query).length === 0 && normalizedFilters.raw_query) {
     query.$text = { $search: normalizedFilters.raw_query };
   }

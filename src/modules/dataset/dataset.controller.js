@@ -24,9 +24,18 @@ const SearchHistory = require('../user/searchHistory.model');
  * Node stays read-only for the datasets collection — Python owns writes.
  */
 const search = asyncHandler(async (req, res) => {
-  const { query } = req.body;
-  if (!query || typeof query !== 'string' || query.trim().length < 2) {
-    throw new ApiError(400, 'A query string of at least 2 characters is required.');
+  const { query, filters: explicitFilters } = req.body;
+  const hasExplicitFilters = explicitFilters && typeof explicitFilters === 'object' && Object.values(explicitFilters).some(v => Array.isArray(v) ? v.length > 0 : Boolean(v));
+  const rawQuery = (typeof query === 'string' ? query.trim() : '');
+
+  if (!rawQuery && !hasExplicitFilters) {
+    throw new ApiError(400, 'A query string of at least 2 characters or active filter selections are required.');
+  }
+
+  let effectiveQuery = rawQuery;
+  if (!effectiveQuery && hasExplicitFilters) {
+    const filterTokens = Object.values(explicitFilters).flatMap(v => Array.isArray(v) ? v : [v]).filter(Boolean);
+    effectiveQuery = filterTokens.join(' ');
   }
 
   let userEmail = 'anonymous';
@@ -38,10 +47,15 @@ const search = asyncHandler(async (req, res) => {
   }
   let filters;
   try {
-    filters = await parseQuery(query, req.user?.id, userEmail);
+    filters = await parseQuery(effectiveQuery || 'neuroscience datasets', req.user?.id, userEmail);
   } catch (err) {
-    logger.warn(`Dataset search parser fallback triggered for query="${query}": ${err.message}`);
-    filters = { raw_query: query };
+    logger.warn(`Dataset search parser fallback triggered for query="${effectiveQuery}": ${err.message}`);
+    filters = { raw_query: effectiveQuery };
+  }
+
+  // Merge user explicit filters over parser filters
+  if (hasExplicitFilters) {
+    filters = { ...filters, ...explicitFilters, raw_query: effectiveQuery || filters.raw_query };
   }
 
   const cachedResults = await searchDatasets(filters);
