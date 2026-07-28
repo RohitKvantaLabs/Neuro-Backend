@@ -50,11 +50,7 @@ const resetPasswordSchema = Joi.object({
 const completeOnboardingSchema = Joi.object({
   name: Joi.string().trim().min(2).max(100).required(),
   role: Joi.string().valid(...ROLES).required(),
-  institute: Joi.when('role', {
-    is: 'student',
-    then: Joi.string().trim().required().messages({ 'any.required': 'institute is required for students.' }),
-    otherwise: Joi.string().trim().allow('', null).optional(),
-  }),
+  institute: Joi.string().trim().required().messages({ 'any.required': 'Organization/Institute Name is required.' }),
   // phone optional here — controller enforces it only if user.phone is null (Google accounts)
   countryCode: countryCode.optional(),
   phone: phone.optional(),
