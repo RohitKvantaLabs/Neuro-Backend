@@ -2,6 +2,7 @@ const Announcement = require('./announcement.model');
 const ApiError = require('../../utils/ApiError');
 const ApiResponse = require('../../utils/ApiResponse');
 const asyncHandler = require('../../utils/asyncHandler');
+const { logAdminAction } = require('../../utils/auditLog.util');
 
 // GET /announcements — Public endpoint to list active system broadcasts
 const listActiveAnnouncements = asyncHandler(async (req, res) => {
@@ -55,6 +56,8 @@ const createAnnouncement = asyncHandler(async (req, res) => {
     created_by: req.user?.id || null,
   });
 
+  logAdminAction(req.user.id, 'announcement.create', 'announcement', announcement._id.toString(), { title: announcement.title });
+
   const formatted = {
     id: announcement._id.toString(),
     title: announcement.title,
@@ -96,6 +99,8 @@ const updateAnnouncement = asyncHandler(async (req, res) => {
 
   await announcement.save();
 
+  logAdminAction(req.user.id, 'announcement.update', 'announcement', id, { title: title ? title.trim() : announcement.title });
+
   const formatted = {
     id: announcement._id.toString(),
     title: announcement.title,
@@ -120,6 +125,8 @@ const toggleAnnouncement = asyncHandler(async (req, res) => {
   announcement.active = active !== undefined ? Boolean(active) : !announcement.active;
   await announcement.save();
 
+  logAdminAction(req.user.id, 'announcement.toggle', 'announcement', id, { active: announcement.active });
+
   const formatted = {
     id: announcement._id.toString(),
     title: announcement.title,
@@ -139,6 +146,8 @@ const deleteAnnouncement = asyncHandler(async (req, res) => {
   if (!announcement) {
     throw new ApiError(404, 'Announcement not found.');
   }
+
+  logAdminAction(req.user.id, 'announcement.delete', 'announcement', id, { title: announcement.title });
 
   return new ApiResponse(200, null, 'Announcement deleted.').send(res);
 });
