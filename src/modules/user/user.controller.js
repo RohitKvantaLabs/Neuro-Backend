@@ -287,6 +287,7 @@ const updateMe = asyncHandler(async (req, res) => {
 
   if (value.name !== undefined) user.name = value.name;
   if (value.institute !== undefined) user.institute = value.institute;
+  if (value.role !== undefined) user.role = value.role;
 
   await user.save();
   return new ApiResponse(200, { id: user._id, name: user.name, email: user.email }, 'Profile updated.').send(res);

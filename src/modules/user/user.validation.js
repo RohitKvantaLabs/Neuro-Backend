@@ -62,6 +62,7 @@ const updateMeSchema = Joi.object({
   institute: Joi.string().trim().allow('', null),
   countryCode: countryCode.optional(),
   phone: phone.optional(),
+  role: Joi.string().valid(...ROLES).optional(),
 }).min(1);
 
 // §10.7 — PATCH /users/me/notifications
