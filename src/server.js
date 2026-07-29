@@ -65,3 +65,5 @@ start().catch((err) => {
   logger.error(`Fatal startup error: ${err.stack || err.message}`);
   process.exit(1);
 });
+
+module.exports = app;
