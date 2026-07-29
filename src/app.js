@@ -76,6 +76,8 @@ app.use(async (req, res, next) => {
 });
 
 app.use('/api/v1', apiRouter);
+app.use('/v1', apiRouter);
+app.use('/', apiRouter);
 
 app.use(notFound);
 app.use(errorHandler); // must be last
