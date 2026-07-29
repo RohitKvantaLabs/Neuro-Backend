@@ -50,6 +50,9 @@ function buildMongoQuery(filters = {}) {
     query.age_group = { $in: ageGroups };
   }
 
+  const regions = toRegexArray(normalizedFilters.region);
+  if (regions.length) query.region = { $in: regions };
+
   const availabilities = toRegexArray(normalizedFilters.availability || normalizedFilters.access_tier);
   if (availabilities.length) {
     query.access_tier = { $in: availabilities };
