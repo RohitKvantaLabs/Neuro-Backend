@@ -92,7 +92,7 @@ async function parseQuery(query, userId = null, userEmail = 'anonymous') {
       agent: 'parse_query',
       query: query.slice(0, 500),
       durationMs: duration,
-      resultCount: Object.keys(filters).length,
+      resultCount: 0,
       status: 'success',
     }).catch(() => {});
 
