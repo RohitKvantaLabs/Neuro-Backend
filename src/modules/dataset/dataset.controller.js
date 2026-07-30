@@ -110,9 +110,17 @@ const search = asyncHandler(async (req, res) => {
   ).send(res);
 });
 
-// GET /datasets/:id — fetch a single dataset by Mongo _id for the detail page
+// GET /datasets/:id — fetch a single dataset by Mongo _id or source_id for the detail page
 const getById = asyncHandler(async (req, res) => {
-  const dataset = await Dataset.findById(req.params.id).lean();
+  const { id } = req.params;
+  const mongoose = require('mongoose');
+  let dataset = null;
+  if (mongoose.Types.ObjectId.isValid(id)) {
+    dataset = await Dataset.findById(id).lean();
+  }
+  if (!dataset) {
+    dataset = await Dataset.findOne({ source_id: id }).lean();
+  }
   if (!dataset) throw new ApiError(404, 'Dataset not found.');
   return new ApiResponse(200, dataset).send(res);
 });
