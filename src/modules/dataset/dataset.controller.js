@@ -2,8 +2,10 @@ const ApiError = require('../../utils/ApiError');
 const ApiResponse = require('../../utils/ApiResponse');
 const asyncHandler = require('../../utils/asyncHandler');
 const logger = require('../../utils/logger');
+const env = require('../../config/env.config');
 const { parseQuery, runFallbackSearch } = require('../agent/agent.client');
 const { searchDatasets } = require('./dataset.service');
+const { orchestrateSearch } = require('./retrievalOrchestrator');
 const Dataset = require('./dataset.model');
 const { User } = require('../user/user.model');
 const QueryLog = require('../queryLog/queryLog.model');
@@ -12,13 +14,14 @@ const SearchHistory = require('../user/searchHistory.model');
 /**
  * POST /datasets/search
  *
- * Flow:
- *   1. Blocking call to Python's parse-query -> structured filters
- *   2. Query Mongo with those filters
- *   3. Cache hit -> return results directly, done
- *   4. Cache miss -> blocking call to Python's fallback-search
- *      Python writes any new matches into Mongo during that call.
- *      Re-run the same Mongo search to pick them up; return 200.
+ * When FF_USE_NEW_ORCHESTRATOR=true:
+ *   Delegates entirely to RetrievalOrchestrator, which implements the full
+ *   Retrieval Orchestrator architecture (§7): parse → MongoDB → quality →
+ *   Discovery Policy → optional Discovery Agent → Layer 3 ranking.
+ *
+ * When FF_USE_NEW_ORCHESTRATOR=false (default):
+ *   Runs the original binary decision flow (cache hit → return, miss → fallback).
+ *   Preserved exactly for rollback safety (§18.6).
  *
  * §10.5: Fire-and-forget SearchHistory write for authenticated users.
  * Node stays read-only for the datasets collection — Python owns writes.
@@ -45,6 +48,43 @@ const search = asyncHandler(async (req, res) => {
       if (u) userEmail = u.email;
     } catch { /* best-effort */ }
   }
+
+  // §10.5: fire-and-forget — don't block the response on the history write
+  if (req.user?.id) {
+    SearchHistory.create({ userId: req.user.id, query: (rawQuery || effectiveQuery).slice(0, 500) })
+      .catch((err) => logger.warn(`SearchHistory write failed: ${err.message}`));
+  }
+
+  // ── Feature flag: new Retrieval Orchestrator (§18.5) ──────────────────────
+  if (env.featureFlags?.useNewOrchestrator) {
+    const orchestratorResult = await orchestrateSearch(
+      effectiveQuery || 'neuroscience datasets',
+      hasExplicitFilters ? explicitFilters : null,
+      { userId: req.user?.id, userEmail }
+    );
+
+    await QueryLog.create({
+      userId:       req.user?.id || null,
+      rawQuery:     rawQuery,
+      filters:      orchestratorResult.filters,
+      resultSource: orchestratorResult.source,
+      resultCount:  orchestratorResult.metrics.totalFound,
+    }).catch((err) => logger.warn(`QueryLog write failed: ${err.message}`));
+
+    return new ApiResponse(
+      200,
+      {
+        source:  orchestratorResult.source,
+        results: orchestratorResult.results,
+        metrics: orchestratorResult.metrics,
+      },
+      orchestratorResult.results.length > 0
+        ? 'Results found.'
+        : 'No datasets found for this query.'
+    ).send(res);
+  }
+
+  // ── Legacy path (unchanged) ───────────────────────────────────────────────
   let filters;
   try {
     filters = await parseQuery(effectiveQuery || 'neuroscience datasets', req.user?.id, userEmail);
@@ -60,12 +100,6 @@ const search = asyncHandler(async (req, res) => {
 
   const cachedResults = await searchDatasets(filters);
 
-  // §10.5: fire-and-forget — don't block the response on the history write
-  if (req.user?.id) {
-    SearchHistory.create({ userId: req.user.id, query: query.trim().slice(0, 500) })
-      .catch((err) => logger.warn(`SearchHistory write failed: ${err.message}`));
-  }
-
   if (cachedResults.length > 0) {
     await QueryLog.create({
       userId: req.user?.id || null,
@@ -77,8 +111,7 @@ const search = asyncHandler(async (req, res) => {
     return new ApiResponse(200, { source: 'cache', results: cachedResults }, 'Results found.').send(res);
   }
 
-  // Cache miss: return Python's verified records directly. A second Mongo
-  // query could exclude newly discovered data that is not an exact filter fit.
+  // Cache miss: return Python's verified records directly.
   let fallbackDatasets = [];
   try {
     const agentResult = await runFallbackSearch({
@@ -93,8 +126,6 @@ const search = asyncHandler(async (req, res) => {
     throw new ApiError(502, 'Dataset fallback search could not be completed. Please try again.');
   }
 
-  // Python already wrote any new matches into Mongo by the time its
-  // response returns — re-run the same search to pick them up.
   await QueryLog.create({
     userId: req.user?.id || null,
     rawQuery: query,
@@ -118,3 +149,4 @@ const getById = asyncHandler(async (req, res) => {
 });
 
 module.exports = { search, getById };
+

@@ -75,4 +75,27 @@ module.exports = {
     adminExpiryMinutes: parseInt(process.env.ADMIN_OTP_EXPIRY_MINUTES, 10) || 5,
     passwordResetExpiryMinutes: parseInt(process.env.PASSWORD_RESET_OTP_EXPIRY_MINUTES, 10) || 10,
   },
+
+  // Retrieval Orchestrator — Discovery Policy thresholds (§Appendix A)
+  discoveryPolicy: {
+    minResults:             parseInt(process.env.DP_MIN_RESULTS, 10)                    || 3,
+    fieldCoverageThreshold: parseFloat(process.env.DP_FIELD_COVERAGE_THRESHOLD)         || 0.3,
+    qualityThreshold:       parseFloat(process.env.DP_QUALITY_THRESHOLD)                || 0.4,
+    freshnessDays:          parseInt(process.env.DP_FRESHNESS_DAYS, 10)                 || 180,
+    decisionThreshold:      parseFloat(process.env.DP_DECISION_THRESHOLD)               || 0.5,
+  },
+
+  // Retrieval Orchestrator — Layer 3 Ranking weights (§Appendix C)
+  rankingEngine: {
+    matchWeight:     parseFloat(process.env.RE_MATCH_WEIGHT)     || 0.50,
+    qualityWeight:   parseFloat(process.env.RE_QUALITY_WEIGHT)   || 0.20,
+    freshnessWeight: parseFloat(process.env.RE_FRESHNESS_WEIGHT) || 0.15,
+    trustWeight:     parseFloat(process.env.RE_TRUST_WEIGHT)     || 0.10,
+    diversityWeight: parseFloat(process.env.RE_DIVERSITY_WEIGHT) || 0.05,
+  },
+
+  // Feature flag — toggle between new orchestrator and legacy search (§18.5)
+  featureFlags: {
+    useNewOrchestrator: process.env.FF_USE_NEW_ORCHESTRATOR === 'true',
+  },
 };

@@ -1,0 +1,248 @@
+/**
+ * DiscoveryPolicy
+ *
+ * Pure computation — no I/O, no network calls, no database queries.
+ * Evaluates whether external discovery (Discovery Agent) is needed
+ * based on multi-signal quality assessment of MongoDB results.
+ *
+ * Architecture ref: §8 "Discovery Policy Design"
+ *
+ * Signals (§8.5):
+ *   1. zero_results          — weight 1.0 (always trigger)
+ *   2. low_result_count      — weight 0.8
+ *   3. poor_field_coverage   — weight 0.7
+ *   4. freshness_requirement — weight 0.6
+ *   5. low_metadata_quality  — weight 0.5
+ *   6. high_query_complexity — weight 0.4
+ *   7. low_confidence_results— weight 0.3
+ */
+
+const env = require('../../config/env.config');
+
+// Default thresholds — overridden by env.discoveryPolicy config (§Appendix A)
+const defaults = {
+  minResults: 3,
+  fieldCoverageThreshold: 0.3,
+  qualityThreshold: 0.4,
+  freshnessDays: 180,
+  decisionThreshold: 0.5,
+};
+
+function getThresholds() {
+  const dp = env.discoveryPolicy || {};
+  return {
+    minResults:             dp.minResults             ?? defaults.minResults,
+    fieldCoverageThreshold: dp.fieldCoverageThreshold ?? defaults.fieldCoverageThreshold,
+    qualityThreshold:       dp.qualityThreshold       ?? defaults.qualityThreshold,
+    freshnessDays:          dp.freshnessDays          ?? defaults.freshnessDays,
+    decisionThreshold:      dp.decisionThreshold      ?? defaults.decisionThreshold,
+  };
+}
+
+/**
+ * Compute per-field coverage metrics from the MongoDB result set.
+ *
+ * @param {Object[]} results  - MongoDB dataset documents
+ * @param {Object}   filters  - QueryFilters from parseQuery
+ * @returns {Object} fieldCoverage map as described in §8.3
+ */
+function computeFieldCoverage(results, filters) {
+  const total = results.length;
+  const coverage = {};
+
+  // Map from filter key → dataset field(s) to check
+  const fieldMap = {
+    modality:  (ds, val) => (ds.modality  || []).some((m) => m.toLowerCase() === val.toLowerCase()),
+    species:   (ds, val) => (ds.species   || []).some((s) => s.toLowerCase() === val.toLowerCase()),
+    condition: (ds, val) => {
+      const v = val.toLowerCase();
+      return (
+        (ds.disease  || '').toLowerCase().includes(v) ||
+        (ds.keywords || []).some((k) => k.toLowerCase().includes(v))
+      );
+    },
+    task: (ds, val) => (ds.keywords || []).some((k) => k.toLowerCase().includes(val.toLowerCase())),
+    region: (ds, val) => (ds.region || '').toLowerCase().includes(val.toLowerCase()),
+    age_range:  (ds, val) => (ds.age_group || '').toLowerCase().includes(val.toLowerCase()),
+    age_group:  (ds, val) => (ds.age_group || '').toLowerCase().includes(val.toLowerCase()),
+    format: (ds, val) => (ds.keywords || []).some((k) => k.toLowerCase().includes(val.toLowerCase())),
+  };
+
+  const requestedFields = ['modality', 'species', 'condition', 'task', 'region', 'age_range', 'format'];
+
+  for (const field of requestedFields) {
+    const requested = filters[field];
+    const hasValue = Array.isArray(requested) ? requested.length > 0 : Boolean(requested);
+
+    if (!hasValue) {
+      coverage[field] = { requested: false, matchedRatio: null };
+      continue;
+    }
+
+    // For array-valued filters, a dataset "matches" if it matches ANY of the values
+    const values = Array.isArray(requested) ? requested : [requested];
+    const checker = fieldMap[field] || (() => false);
+    const matchCount = results.filter((ds) => values.some((v) => checker(ds, v))).length;
+    const matchedRatio = total > 0 ? matchCount / total : 0;
+
+    coverage[field] = { requested: true, matchedRatio, matchCount, totalResults: total };
+  }
+
+  return coverage;
+}
+
+/**
+ * Compute aggregate RetrievalQuality from MongoDB results and filters.
+ *
+ * @param {Object[]} results - MongoDB dataset documents
+ * @param {Object}   filters - QueryFilters
+ * @param {Object}   complexityInfo - from analyzeQueryComplexity()
+ * @returns {Object} RetrievalQuality as described in §8.3
+ */
+function computeRetrievalQuality(results, filters, complexityInfo = {}) {
+  const total = results.length;
+
+  if (total === 0) {
+    return {
+      resultCount: 0,
+      fieldCoverage: {},
+      avgMetadataCompleteness: 0,
+      avgTrustTier: 0,
+      newestDatasetDate: null,
+      oldestDatasetDate: null,
+      averageAgeDays: null,
+      uniqueSources: 0,
+      uniqueModalities: 0,
+      complexity: complexityInfo,
+    };
+  }
+
+  const fieldCoverage = computeFieldCoverage(results, filters);
+
+  // Average metadata quality — use quality_score if present, else 0.5 as neutral
+  const avgMetadataCompleteness = results.reduce((sum, ds) => {
+    return sum + (ds.quality_score != null ? ds.quality_score : 0.5);
+  }, 0) / total;
+
+  // Average trust tier (verified=1, unverified=0.5, stale=0)
+  const tierValues = { verified: 1.0, unverified: 0.5, stale: 0.0 };
+  const avgTrustTier = results.reduce((sum, ds) => {
+    return sum + (tierValues[ds.trust_tier] ?? 0.5);
+  }, 0) / total;
+
+  // Freshness
+  const dates = results
+    .map((ds) => ds.updated_at || ds.ingested_at)
+    .filter(Boolean)
+    .map((d) => new Date(d).getTime());
+
+  const now = Date.now();
+  const newestDatasetDate  = dates.length ? new Date(Math.max(...dates)) : null;
+  const oldestDatasetDate  = dates.length ? new Date(Math.min(...dates)) : null;
+  const averageAgeDays     = dates.length
+    ? dates.reduce((sum, t) => sum + (now - t) / (1000 * 60 * 60 * 24), 0) / dates.length
+    : null;
+
+  // Diversity
+  const uniqueSources    = new Set(results.map((ds) => ds.source).filter(Boolean)).size;
+  const uniqueModalities = new Set(results.flatMap((ds) => ds.modality || [])).size;
+
+  return {
+    resultCount: total,
+    fieldCoverage,
+    avgMetadataCompleteness,
+    avgTrustTier,
+    newestDatasetDate,
+    oldestDatasetDate,
+    averageAgeDays,
+    uniqueSources,
+    uniqueModalities,
+    complexity: complexityInfo,
+  };
+}
+
+/**
+ * Evaluate whether external discovery is needed.
+ *
+ * @param {Object} quality     - from computeRetrievalQuality()
+ * @param {Object} filters     - QueryFilters
+ * @param {Object} options     - { queryComplexity, freshnessRequirement }
+ * @returns {{ shouldDiscover: boolean, reason: string|null, confidence: number, signals: string[] }}
+ */
+function evaluate(quality, filters, options = {}) {
+  const thresholds = getThresholds();
+  const triggered = []; // { name, weight, detail? }
+
+  // Signal 1: zero results — always trigger immediately (fast path)
+  if (quality.resultCount === 0) {
+    return {
+      shouldDiscover: true,
+      reason: 'No datasets found in MongoDB',
+      confidence: 1.0,
+      signals: ['zero_results'],
+    };
+  }
+
+  // Signal 2: low result count
+  if (quality.resultCount < thresholds.minResults) {
+    triggered.push({ name: 'low_result_count', weight: 0.8 });
+  }
+
+  // Signal 3: poor field coverage (any requested field below threshold)
+  const coverage = quality.fieldCoverage || {};
+  for (const [field, info] of Object.entries(coverage)) {
+    if (info.requested && info.matchedRatio != null && info.matchedRatio < thresholds.fieldCoverageThreshold) {
+      triggered.push({
+        name: 'poor_field_coverage',
+        weight: 0.7,
+        detail: `${field} coverage ${(info.matchedRatio * 100).toFixed(0)}%`,
+      });
+      break; // one signal is enough — avoid double-counting same type
+    }
+  }
+
+  // Signal 4: freshness requirement
+  const requiresFreshness = options.freshnessRequirement || (quality.complexity && quality.complexity.freshness);
+  if (requiresFreshness && quality.averageAgeDays != null && quality.averageAgeDays > thresholds.freshnessDays) {
+    triggered.push({ name: 'freshness_requirement', weight: 0.6 });
+  }
+
+  // Signal 5: low metadata quality
+  if (quality.avgMetadataCompleteness < thresholds.qualityThreshold) {
+    triggered.push({ name: 'low_metadata_quality', weight: 0.5 });
+  }
+
+  // Signal 6: high query complexity with few results
+  const complexity = options.queryComplexity || quality.complexity || {};
+  if (
+    (complexity.level === 'high' || complexity.level === 'very_high') &&
+    quality.resultCount < 5
+  ) {
+    triggered.push({ name: 'high_query_complexity', weight: 0.4 });
+  }
+
+  // Signal 7: all results are unverified
+  if (quality.avgTrustTier != null && quality.avgTrustTier <= 0.5 && quality.resultCount > 0) {
+    triggered.push({ name: 'low_confidence_results', weight: 0.3 });
+  }
+
+  // Aggregate: take MAX weight of all triggered signals
+  const aggregatedConfidence = triggered.length > 0
+    ? Math.max(...triggered.map((s) => s.weight))
+    : 0;
+
+  const shouldDiscover = aggregatedConfidence >= thresholds.decisionThreshold;
+
+  const reason = shouldDiscover
+    ? triggered.map((s) => s.detail || s.name).join(', ')
+    : null;
+
+  return {
+    shouldDiscover,
+    reason,
+    confidence: aggregatedConfidence,
+    signals: triggered.map((s) => s.name),
+  };
+}
+
+module.exports = { evaluate, computeRetrievalQuality, computeFieldCoverage };

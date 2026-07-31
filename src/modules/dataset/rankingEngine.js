@@ -1,0 +1,241 @@
+/**
+ * Layer 3 Ranking Engine
+ *
+ * Pure computation — no I/O, no network calls, no database queries.
+ * Merges MongoDB and discovery datasets, removes duplicates,
+ * computes a weighted ranking score, and returns the top 20.
+ *
+ * Architecture ref: §9 "Layer 3 Ranking Engine Design"
+ *
+ * Formula (§9.3):
+ *   final_score = matchScore*0.50 + qualityScore*0.20 +
+ *                 freshnessScore*0.15 + trustScore*0.10 + diversityBonus*0.05
+ */
+
+const env = require('../../config/env.config');
+
+const DEFAULT_WEIGHTS = {
+  match:     0.50,
+  quality:   0.20,
+  freshness: 0.15,
+  trust:     0.10,
+  diversity: 0.05,
+};
+
+function getWeights() {
+  const re = env.rankingEngine || {};
+  return {
+    match:     re.matchWeight     ?? DEFAULT_WEIGHTS.match,
+    quality:   re.qualityWeight   ?? DEFAULT_WEIGHTS.quality,
+    freshness: re.freshnessWeight ?? DEFAULT_WEIGHTS.freshness,
+    trust:     re.trustWeight     ?? DEFAULT_WEIGHTS.trust,
+    diversity: re.diversityWeight ?? DEFAULT_WEIGHTS.diversity,
+  };
+}
+
+// ---------- Individual scorers (§9.4) ----------
+
+/**
+ * MatchScore (§9.4.1) — how well a dataset covers the requested filter fields.
+ */
+function computeMatchScore(dataset, filters) {
+  const FILTER_FIELDS = ['modality', 'species', 'condition', 'task', 'region', 'age_range', 'format'];
+  let matchedCount = 0;
+  let requestedCount = 0;
+  const matchDetails = {};
+
+  for (const field of FILTER_FIELDS) {
+    const requested = filters[field];
+    if (!requested || (Array.isArray(requested) && requested.length === 0)) continue;
+
+    requestedCount++;
+    const values = Array.isArray(requested) ? requested : [requested];
+    let matched = false;
+
+    if (field === 'modality') {
+      matched = values.some((v) => (dataset.modality || []).some((m) => m.toLowerCase() === v.toLowerCase()));
+    } else if (field === 'species') {
+      matched = values.some((v) => (dataset.species || []).some((s) => s.toLowerCase() === v.toLowerCase()));
+    } else if (field === 'condition') {
+      matched = values.some((v) => {
+        const vl = v.toLowerCase();
+        return (
+          (dataset.disease || '').toLowerCase().includes(vl) ||
+          (dataset.keywords || []).some((k) => k.toLowerCase().includes(vl))
+        );
+      });
+    } else if (field === 'task') {
+      matched = values.some((v) => (dataset.keywords || []).some((k) => k.toLowerCase().includes(v.toLowerCase())));
+    } else if (field === 'region') {
+      matched = values.some((v) => (dataset.region || '').toLowerCase().includes(v.toLowerCase()));
+    } else if (field === 'age_range') {
+      matched = values.some((v) => (dataset.age_group || '').toLowerCase().includes(v.toLowerCase()));
+    } else if (field === 'format') {
+      matched = values.some((v) => (dataset.keywords || []).some((k) => k.toLowerCase().includes(v.toLowerCase())));
+    }
+
+    matchDetails[field] = matched;
+    if (matched) matchedCount++;
+  }
+
+  // Keyword free-text matching (§9.4.1)
+  if (Array.isArray(filters.keywords) && filters.keywords.length > 0) {
+    requestedCount++;
+    const kwMatched = filters.keywords.some((kw) => {
+      const kl = kw.toLowerCase();
+      return (
+        (dataset.keywords || []).some((dk) => dk.toLowerCase().includes(kl)) ||
+        (dataset.title || '').toLowerCase().includes(kl) ||
+        (dataset.description || '').toLowerCase().includes(kl)
+      );
+    });
+    matchDetails.keywords = kwMatched;
+    if (kwMatched) matchedCount++;
+  }
+
+  const score     = requestedCount > 0 ? matchedCount / requestedCount : 0.5;
+  const matchRatio = requestedCount > 0 ? matchedCount / requestedCount : 0;
+
+  return { score, matchCount: matchedCount, requestedCount, matchRatio, matchDetails };
+}
+
+/**
+ * QualityScore (§9.4.2) — reuses existing quality_score or computes a fallback.
+ */
+function computeQualityScore(dataset) {
+  if (dataset.quality_score != null) return dataset.quality_score;
+
+  // ponytail: fallback for discovered datasets without quality_score
+  let score = 0;
+  if (dataset.title       && dataset.title.length       > 5)  score += 0.15;
+  if (dataset.description && dataset.description.length > 20) score += 0.10;
+  if (dataset.modality    && dataset.modality.length    > 0)  score += 0.07;
+  if (dataset.species     && dataset.species.length     > 0)  score += 0.06;
+  if (dataset.keywords    && dataset.keywords.length    > 0)  score += 0.06;
+  if (dataset.subject_count != null && dataset.subject_count > 0) score += 0.06;
+  return Math.min(score, 0.25) * 4; // normalize 0–1
+}
+
+/**
+ * FreshnessScore (§9.4.3) — age-bracket scoring.
+ */
+function computeFreshnessScore(dataset) {
+  const updatedAt = dataset.updated_at || dataset.ingested_at;
+  if (!updatedAt) return 0.5; // neutral
+
+  const ageDays = (Date.now() - new Date(updatedAt).getTime()) / (1000 * 60 * 60 * 24);
+  if (ageDays <= 30)  return 1.0;
+  if (ageDays <= 90)  return 0.8;
+  if (ageDays <= 180) return 0.6;
+  if (ageDays <= 365) return 0.4;
+  return 0.2;
+}
+
+/**
+ * TrustScore (§9.4.4) — trust_tier enum to score.
+ */
+function computeTrustScore(dataset) {
+  const tiers = { verified: 1.0, unverified: 0.5, stale: 0.0 };
+  return tiers[dataset.trust_tier] ?? 0.5;
+}
+
+/**
+ * DiversityBonus (§9.4.5) — boost underrepresented sources.
+ */
+function computeDiversityBonus(dataset, sourceCounts) {
+  const source = dataset.source || 'unknown';
+  const count  = sourceCounts[source] || 0;
+  if (count <= 1) return 0.05;
+  if (count <= 3) return 0.02;
+  return 0.0;
+}
+
+// ---------- Deduplication (§9.5) ----------
+
+/**
+ * Merge mongodbResults and discoveryResults, deduplicating by source:source_id.
+ * MongoDB results take priority (added first).
+ *
+ * @param {Object[]} mongodbResults
+ * @param {Object[]} discoveryResults
+ * @returns {Object[]} merged array with _source annotation
+ */
+function deduplicate(mongodbResults, discoveryResults) {
+  const seen   = new Set();
+  const merged = [];
+
+  for (const ds of mongodbResults) {
+    const key = `${ds.source}:${ds.source_id}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push({ ...ds, _source: 'mongodb' });
+    }
+  }
+
+  for (const ds of discoveryResults) {
+    const key = `${ds.source}:${ds.source_id}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push({ ...ds, _source: 'discovery' });
+    }
+  }
+
+  return merged;
+}
+
+// ---------- Final ranking (§9.6) ----------
+
+/**
+ * Merge, deduplicate, score, sort, and return top 20 results.
+ *
+ * @param {Object[]} mongodbResults   - from MongoDB search before discovery
+ * @param {Object[]} discoveryResults - net-new results after discovery agent ran
+ * @param {Object}   filters          - QueryFilters from parseQuery
+ * @returns {Object[]} ranked datasets with _rankingScore, _source, _matchDetails
+ */
+function rank(mongodbResults, discoveryResults, filters) {
+  const merged = deduplicate(mongodbResults, discoveryResults);
+  if (merged.length === 0) return [];
+
+  const weights = getWeights();
+
+  // Pre-compute source counts for diversity bonus
+  const sourceCounts = {};
+  for (const ds of merged) {
+    const src = ds.source || 'unknown';
+    sourceCounts[src] = (sourceCounts[src] || 0) + 1;
+  }
+
+  const scored = merged.map((dataset) => {
+    const matchResult    = computeMatchScore(dataset, filters);
+    const qualityScore   = computeQualityScore(dataset);
+    const freshnessScore = computeFreshnessScore(dataset);
+    const trustScore     = computeTrustScore(dataset);
+    const diversityBonus = computeDiversityBonus(dataset, sourceCounts);
+
+    const finalScore = (
+      matchResult.score * weights.match     +
+      qualityScore      * weights.quality   +
+      freshnessScore    * weights.freshness +
+      trustScore        * weights.trust     +
+      diversityBonus    * weights.diversity
+    );
+
+    return {
+      ...dataset,
+      _rankingScore: Math.round(finalScore * 10000) / 10000,
+      _matchDetails: {
+        ...matchResult.matchDetails,
+        matchCount:    matchResult.matchCount,
+        requestedCount: matchResult.requestedCount,
+        matchRatio:    matchResult.matchRatio,
+      },
+    };
+  });
+
+  // Sort descending by score, return top 20
+  scored.sort((a, b) => b._rankingScore - a._rankingScore);
+  return scored.slice(0, 20);
+}
+
+module.exports = { rank, deduplicate, computeMatchScore, computeQualityScore, computeFreshnessScore, computeTrustScore };

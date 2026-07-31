@@ -93,4 +93,7 @@ async function searchDatasets(filters, limit = 20) {
   return [];
 }
 
-module.exports = { buildMongoQuery, searchDatasets };
+// ponytail: alias for RetrievalOrchestrator (architecture §18.2) — same function, separate export name.
+const searchMongoDB = searchDatasets;
+
+module.exports = { buildMongoQuery, searchDatasets, searchMongoDB };
