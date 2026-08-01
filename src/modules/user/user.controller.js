@@ -287,6 +287,9 @@ const updateMe = asyncHandler(async (req, res) => {
   const nextPhone = value.phone ?? user.phone;
   const phoneChanged = nextCountryCode !== user.countryCode || nextPhone !== user.phone;
   if (phoneChanged) {
+    if (user.phone) {
+      throw new ApiError(400, 'Phone number cannot be changed once set.');
+    }
     if (!nextCountryCode || !nextPhone) {
       throw new ApiError(400, 'countryCode and phone must both be set before changing a phone number.');
     }
