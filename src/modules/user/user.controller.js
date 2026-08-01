@@ -7,6 +7,7 @@ const { OTP_PURPOSES, generateOtp, hashOtp, compareOtp } = require('../../utils/
 const { sendOtpEmail } = require('../../utils/mailer');
 const { verifyGoogleIdToken } = require('../auth/google.service');
 const env = require('../../config/env.config');
+const { parsePhoneAndCountryCode } = require('../../utils/phoneUtils');
 const {
   registerSchema,
   loginSchema,
@@ -57,6 +58,11 @@ function issueFullTokens(res, user) {
 // ─── controllers ──────────────────────────────────────────────────────────────
 
 const register = asyncHandler(async (req, res) => {
+  if (req.body.countryCode || req.body.phone) {
+    const parsed = parsePhoneAndCountryCode(req.body.countryCode, req.body.phone);
+    if (parsed.countryCode) req.body.countryCode = parsed.countryCode;
+    if (parsed.phone) req.body.phone = parsed.phone;
+  }
   const { error, value } = registerSchema.validate(req.body);
   if (error) throw new ApiError(400, error.details[0].message);
 
@@ -238,12 +244,16 @@ const getMe = asyncHandler(async (req, res) => {
     account_activity: prefs.account_activity ?? defaultEnabled,
   };
 
+  const parsedPhone = parsePhoneAndCountryCode(user.countryCode, user.phone);
+  const cleanCc = parsedPhone.countryCode || user.countryCode;
+  const cleanPh = parsedPhone.phone || user.phone;
+
   return new ApiResponse(200, {
     id: user._id,
     name: user.name,
     email: user.email,
-    countryCode: user.countryCode,
-    phone: user.phone,
+    countryCode: cleanCc,
+    phone: cleanPh ? ` ${cleanPh.trim()}` : null,
     role: user.role,
     institute: user.institute,
     isOnboarded: user.isOnboarded,
@@ -260,6 +270,11 @@ const getMe = asyncHandler(async (req, res) => {
 
 // §10.7 — PUT /users/me
 const updateMe = asyncHandler(async (req, res) => {
+  if (req.body.countryCode || req.body.phone) {
+    const parsed = parsePhoneAndCountryCode(req.body.countryCode, req.body.phone);
+    if (parsed.countryCode) req.body.countryCode = parsed.countryCode;
+    if (parsed.phone) req.body.phone = parsed.phone;
+  }
   const { error, value } = updateMeSchema.validate(req.body);
   if (error) throw new ApiError(400, error.details[0].message);
 
@@ -335,6 +350,11 @@ const updateNotifications = asyncHandler(async (req, res) => {
 
 // §10.2 — POST /auth/complete-onboarding
 const completeOnboarding = asyncHandler(async (req, res) => {
+  if (req.body.countryCode || req.body.phone) {
+    const parsed = parsePhoneAndCountryCode(req.body.countryCode, req.body.phone);
+    if (parsed.countryCode) req.body.countryCode = parsed.countryCode;
+    if (parsed.phone) req.body.phone = parsed.phone;
+  }
   const { error, value } = completeOnboardingSchema.validate(req.body);
   if (error) throw new ApiError(400, error.details[0].message);
 

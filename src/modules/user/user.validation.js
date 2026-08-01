@@ -5,7 +5,7 @@ const { PASSWORD_REGEX, PASSWORD_MESSAGE } = require('../../utils/passwordPolicy
 // ponytail: schemas only — async email validation (MX) runs inside the controller after Joi passes
 // countryCode: E.164 prefix e.g. "+91", stored separately from digit-only phone
 const countryCode = Joi.string()
-  .pattern(/^\+[1-9]\d{0,3}$/)
+  .pattern(/^\+[1-9]\d{0,2}$/)
   .message('countryCode must be a valid E.164 prefix (e.g. "+91").');
 
 const phone = Joi.string()
@@ -50,7 +50,11 @@ const resetPasswordSchema = Joi.object({
 const completeOnboardingSchema = Joi.object({
   name: Joi.string().trim().min(2).max(100).required(),
   role: Joi.string().valid(...ROLES).required(),
-  institute: Joi.string().trim().required().messages({ 'any.required': 'Organization/Institute Name is required.' }),
+  institute: Joi.string().trim().when('role', {
+    is: 'student',
+    then: Joi.required().messages({ 'any.required': 'Organization/Institute Name is required.' }),
+    otherwise: Joi.optional().allow('', null),
+  }),
   // phone optional here — controller enforces it only if user.phone is null (Google accounts)
   countryCode: countryCode.optional(),
   phone: phone.optional(),
