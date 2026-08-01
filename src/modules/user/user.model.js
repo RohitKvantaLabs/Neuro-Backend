@@ -2,8 +2,7 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
 // Confirmed ROLES enum — backend is the source of truth.
-// Frontend dropdown values are being updated to match these, not the other way around.
-const ROLES = ['student', 'researcher', 'scientist', 'working_professional'];
+const ROLES = ['academic_researcher', 'industry_researcher', 'healthcare_professional', 'data_ai_engineer', 'other'];
 
 const userSchema = new mongoose.Schema(
   {

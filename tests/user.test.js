@@ -161,7 +161,7 @@ describe('Test 4 — completeOnboarding for local user (phone already set)', () 
     const res = await request(app)
       .post('/api/v1/auth/complete-onboarding')
       .set('Authorization', `Bearer ${token}`)
-      .send({ name: 'Dave Doe', role: 'researcher', institute: 'MIT' });
+      .send({ name: 'Dave Doe', role: 'academic_researcher', institute: 'MIT' });
 
     expect(res.status).toBe(200);
     expect(res.body.data.accessToken).toBeDefined();
@@ -169,7 +169,7 @@ describe('Test 4 — completeOnboarding for local user (phone already set)', () 
     const updated = await User.findById(user._id);
     expect(updated.isOnboarded).toBe(true);
     expect(updated.name).toBe('Dave Doe');
-    expect(updated.role).toBe('researcher');
+    expect(updated.role).toBe('academic_researcher');
     expect(updated.institute).toBe('MIT');
   });
 });
@@ -187,7 +187,7 @@ describe('Test 5 — completeOnboarding for Google user (phone required)', () =>
     const res = await request(app)
       .post('/api/v1/auth/complete-onboarding')
       .set('Authorization', `Bearer ${token}`)
-      .send({ name: 'Eve G.', role: 'student', institute: 'Stanford', countryCode: '+1', phone: '4155550005' });
+      .send({ name: 'Eve G.', role: 'academic_researcher', institute: 'Stanford', countryCode: '+1', phone: '4155550005' });
 
     expect(res.status).toBe(200);
     expect(res.body.data.accessToken).toBeDefined();
@@ -218,7 +218,7 @@ describe('Test 5 — completeOnboarding for Google user (phone required)', () =>
     const res = await request(app)
       .post('/api/v1/auth/complete-onboarding')
       .set('Authorization', `Bearer ${token}`)
-      .send({ name: 'Eve 2', role: 'student', institute: 'Harvard', countryCode: '+1', phone });
+      .send({ name: 'Eve 2', role: 'academic_researcher', institute: 'Harvard', countryCode: '+1', phone });
 
     expect(res.status).toBe(409);
   });
@@ -226,7 +226,7 @@ describe('Test 5 — completeOnboarding for Google user (phone required)', () =>
 
 // ── Test 6: Conditional institute validation ───────────────────────────────────
 
-describe('Test 6 — Conditional validation: institute required for students', () => {
+describe('Test 6 — Conditional validation: institute required for academic_researchers', () => {
   let token;
 
   beforeEach(async () => {
@@ -237,20 +237,20 @@ describe('Test 6 — Conditional validation: institute required for students', (
     token = makeFullAccessToken(user._id.toString());
   });
 
-  it('rejects role:student without institute', async () => {
+  it('rejects role:academic_researcher without institute', async () => {
     const res = await request(app)
       .post('/api/v1/auth/complete-onboarding')
       .set('Authorization', `Bearer ${token}`)
-      .send({ name: 'Frank F.', role: 'student' }); // no institute
+      .send({ name: 'Frank F.', role: 'academic_researcher' }); // no institute
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/institute/i);
   });
 
-  it('accepts role:researcher without institute (institute optional for non-students)', async () => {
+  it('accepts role:industry_researcher without institute (institute optional for non-academic researchers)', async () => {
     const res = await request(app)
       .post('/api/v1/auth/complete-onboarding')
       .set('Authorization', `Bearer ${token}`)
-      .send({ name: 'Frank F.', role: 'researcher' }); // no institute — allowed
+      .send({ name: 'Frank F.', role: 'industry_researcher' }); // no institute — allowed
     expect(res.status).toBe(200);
   });
 });

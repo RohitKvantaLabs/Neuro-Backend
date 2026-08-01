@@ -51,7 +51,7 @@ const completeOnboardingSchema = Joi.object({
   name: Joi.string().trim().min(2).max(100).required(),
   role: Joi.string().valid(...ROLES).required(),
   institute: Joi.string().trim().when('role', {
-    is: 'student',
+    is: 'academic_researcher',
     then: Joi.required().messages({ 'any.required': 'Organization/Institute Name is required.' }),
     otherwise: Joi.optional().allow('', null),
   }),
