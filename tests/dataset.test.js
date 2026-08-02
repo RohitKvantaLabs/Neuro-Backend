@@ -43,7 +43,7 @@ jest.mock('../src/modules/user/user.model', () => ({
       }),
     }),
   },
-  ROLES: ['student', 'researcher', 'scientist', 'working_professional'],
+  ROLES: ['academic_researcher', 'industry_researcher', 'healthcare_professional', 'data_ai_engineer', 'other'],
 }));
 
 describe('POST /api/v1/datasets/search', () => {
