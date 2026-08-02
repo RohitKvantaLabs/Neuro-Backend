@@ -164,13 +164,30 @@ function computeRetrievalQuality(results, filters, complexityInfo = {}) {
 /**
  * Evaluate whether external discovery is needed.
  *
+ * Public API unchanged (§4.4) — delegates to the shared signal core with the
+ * default thresholds from getThresholds().
+ *
  * @param {Object} quality     - from computeRetrievalQuality()
  * @param {Object} filters     - QueryFilters
  * @param {Object} options     - { queryComplexity, freshnessRequirement }
  * @returns {{ shouldDiscover: boolean, reason: string|null, confidence: number, signals: string[] }}
  */
 function evaluate(quality, filters, options = {}) {
-  const thresholds = getThresholds();
+  return _evaluateCore(quality, filters, options, getThresholds());
+}
+
+/**
+ * Core signal evaluation shared by evaluate() and evaluateAfterRepositories().
+ * Pure — no I/O. Accepts an explicit threshold set so the post-repository
+ * decision can raise the effective bar (§4.4) without changing evaluate().
+ *
+ * @param {Object} quality     - from computeRetrievalQuality()
+ * @param {Object} filters     - QueryFilters
+ * @param {Object} options     - { queryComplexity, freshnessRequirement }
+ * @param {Object} thresholds  - resolved threshold set (getThresholds() by default)
+ * @returns {{ shouldDiscover: boolean, reason: string|null, confidence: number, signals: string[] }}
+ */
+function _evaluateCore(quality, filters, options = {}, thresholds = getThresholds()) {
   const triggered = []; // { name, weight, detail? }
 
   // Signal 1: zero results — always trigger immediately (fast path)
@@ -245,4 +262,48 @@ function evaluate(quality, filters, options = {}) {
   };
 }
 
-module.exports = { evaluate, computeRetrievalQuality, computeFieldCoverage };
+/**
+ * Evaluate whether web discovery is still needed AFTER the repository tier ran.
+ *
+ * §4.4 — reuses evaluate() semantics but raises the effective bar against the
+ * combined Mongo + repository pool before spending money on the web tier:
+ *   - minResults        × 2 (repositories should beat the base bar)
+ *   - fieldCoverageThreshold + 0.2 (capped at 1.0)
+ *   - gates on env.featureFlags.useWebDiscovery (default true)
+ *
+ * Pure — no I/O. Existing evaluate() is unchanged.
+ *
+ * @param {Object} quality     - from computeRetrievalQuality([...mongo, ...repo])
+ * @param {Object} filters     - QueryFilters
+ * @param {Object} options     - { queryComplexity, freshnessRequirement }
+ * @returns {{ shouldDiscoverWeb: boolean, reason: string|null, confidence: number, signals: string[] }}
+ */
+function evaluateAfterRepositories(quality, filters, options = {}) {
+  // Gate 0: web tier feature flag (default true, §5.2).
+  if (env.featureFlags?.useWebDiscovery === false) {
+    return {
+      shouldDiscoverWeb: false,
+      reason: 'web_discovery_disabled',
+      confidence: 0,
+      signals: [],
+    };
+  }
+
+  // Raise the effective bar against the combined pool (§4.4).
+  const base = getThresholds();
+  const raised = {
+    ...base,
+    minResults: base.minResults * 2,
+    fieldCoverageThreshold: Math.min(1, base.fieldCoverageThreshold + 0.2),
+  };
+
+  const decision = _evaluateCore(quality, filters, options, raised);
+  return {
+    shouldDiscoverWeb: decision.shouldDiscover,
+    reason: decision.reason,
+    confidence: decision.confidence,
+    signals: decision.signals,
+  };
+}
+
+module.exports = { evaluate, evaluateAfterRepositories, computeRetrievalQuality, computeFieldCoverage };

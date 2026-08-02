@@ -10,6 +10,12 @@ const { CircuitBreaker } = require('../../utils/circuitBreaker');
 const _parseCache = new Map(); // key: query string, value: { filters, expiresAt }
 const PARSE_CACHE_TTL_MS = 5 * 60 * 1000;
 
+// §4.7 — in-process repository-search result cache. Same filters within the
+// configured TTL (default 5 min, §5.2) skip the Python repository tier entirely.
+// Key = stable JSON of { filters, sources, limitPerSource } — mirrors _parseCache.
+const _repoSearchCache = new Map();
+const REPO_SEARCH_CACHE_TTL_MS = env.repositoryRetrieval?.cacheTtlMs || 5 * 60 * 1000;
+
 // Circuit breaker for Python agent calls — 5 failures within 30s opens
 // for 30s of fast-fail, preventing cascading waits when the Python side
 // is slow or down.
@@ -122,6 +128,119 @@ async function parseQuery(query, userId = null, userEmail = 'anonymous') {
 }
 
 /**
+ * §4.7/§4.2 — repository tier search.
+ *
+ * POST /agents/repository-search: Python runs the enabled connectors in
+ * parallel, aggregates the candidate pool, runs quality pipeline stages 1–6
+ * (no publish) and returns scored/deduped Dataset[] directly in the response.
+ *
+ * Results are cached in-process for REPO_SEARCH_CACHE_TTL_MS keyed on the
+ * stable JSON of { filters, sources, limitPerSource } — identical filters
+ * within the TTL skip the Python repository tier entirely.
+ *
+ * Returns: { query_id, sources_queried, total_found, elapsed_ms, datasets }
+ * Throws on HTTP/network failure — the orchestrator degrades to the web tier.
+ */
+async function runRepositorySearch({ query, filters, sources, limitPerSource, userId = null, userEmail = 'anonymous' }) {
+  const cacheKey = JSON.stringify({ filters, sources, limitPerSource });
+
+  // ponytail: cache hit — skip the Python repository tier entirely.
+  const cached = _repoSearchCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    logger.info(`runRepositorySearch cache hit for query="${query}"`);
+    return cached.data;
+  }
+
+  const start = Date.now();
+  try {
+    // Circuit breaker wraps the HTTP call — if Python is down/slow, we
+    // fast-fail instead of blocking for the full timeout.
+    const { data } = await _pythonAgentCB.wrap(
+      () => client.post('/agents/repository-search', {
+        query,
+        filters,
+        sources,
+        limit_per_source: limitPerSource,
+      })
+    )();
+
+    // ponytail: store in cache before returning.
+    _repoSearchCache.set(cacheKey, { data, expiresAt: Date.now() + REPO_SEARCH_CACHE_TTL_MS });
+
+    const duration = Date.now() - start;
+    const tokens = estimateTokens(query) + estimateTokens(JSON.stringify(filters || {}));
+
+    logger.info(`Repository search completed for query="${query}": sources=${data?.sources_queried?.length ?? 0}, total_found=${data?.total_found ?? 0}`);
+
+    // Fire-and-forget token & agent logging
+    TokenUsage.create({
+      userId: userId || null,
+      userEmail: userEmail || 'anonymous',
+      agent: 'repository_search',
+      model: data?.model || env.pythonAgent.model,
+      tokens,
+      query: query.slice(0, 500),
+      durationMs: duration,
+      status: 'success',
+    }).catch(() => {});
+    AgentLog.create({
+      userId: userId || null,
+      agent: 'repository_search',
+      query: query.slice(0, 500),
+      durationMs: duration,
+      resultCount: data?.total_found ?? 0,
+      status: 'success',
+    }).catch(() => {});
+
+    return data; // { query_id, sources_queried, total_found, elapsed_ms, datasets }
+  } catch (err) {
+    const duration = Date.now() - start;
+    logger.warn(`Repository search failed for query="${query}": ${err.message}`);
+
+    AgentLog.create({
+      userId: userId || null,
+      agent: 'repository_search',
+      query: query.slice(0, 500),
+      durationMs: duration,
+      resultCount: 0,
+      status: 'error',
+      errorMessage: err.message,
+    }).catch(() => {});
+
+    throw err; // re-throw for the orchestrator to degrade (repo tier → web tier)
+  }
+}
+
+/**
+ * §4.7 — admin resync trigger.
+ *
+ * POST /agents/repository-sync: Python runs the batch pipeline (fetch →
+ * normalize → quality pipeline stages 1–7 publish) for one/all sources and
+ * returns per-source PipelineResult.
+ *
+ * Returns: { results: { [source]: PipelineResult } }
+ * Throws on HTTP/network failure — admin.controller marks the repo offline.
+ */
+async function runRepositorySync({ source = null, limitPerSource = null, embed = true }) {
+  const start = Date.now();
+  try {
+    const { data } = await _pythonAgentCB.wrap(
+      () => client.post('/agents/repository-sync', {
+        source,
+        limit_per_source: limitPerSource,
+        embed,
+      })
+    )();
+    const duration = Date.now() - start;
+    logger.info(`Repository sync completed for source="${source || 'all'}" in ${duration}ms`);
+    return data; // { results: { [source]: PipelineResult } }
+  } catch (err) {
+    logger.error(`Repository sync failed for source="${source || 'all'}": ${err.message}`);
+    throw err; // re-throw for the admin controller to mark the repo offline
+  }
+}
+
+/**
  * BLOCKING - waits for Python to finish writing datasets into Mongo,
  * then returns only the receipt. Python owns all writes to the datasets
  * collection; Node re-queries Mongo after this resolves to pick them up.
@@ -182,4 +301,4 @@ async function runFallbackSearch({ query, filters, userId, userEmail }) {
   }
 }
 
-module.exports = { parseQuery, runFallbackSearch };
+module.exports = { parseQuery, runFallbackSearch, runRepositorySearch, runRepositorySync };

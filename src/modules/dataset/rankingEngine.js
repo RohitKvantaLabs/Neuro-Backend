@@ -150,51 +150,76 @@ function computeDiversityBonus(dataset, sourceCounts) {
   return 0.0;
 }
 
-// ---------- Deduplication (§9.5) ----------
+// ---------- Deduplication (§9.5 / §4.5) ----------
 
 /**
- * Merge mongodbResults and discoveryResults, deduplicating by source:source_id.
- * MongoDB results take priority (added first).
+ * Merge three pools — MongoDB, repository, web discovery — deduplicating by
+ * source:source_id. Priority order is Mongo first, then repository, then web
+ * (§4.5), so earlier pools win on ties.
+ *
+ * Backward-compatible: the legacy 2-pool call deduplicate(mongo, discovery)
+ * is still supported (repository pool omitted).
  *
  * @param {Object[]} mongodbResults
+ * @param {Object[]} repositoryResults
  * @param {Object[]} discoveryResults
  * @returns {Object[]} merged array with _source annotation
  */
-function deduplicate(mongodbResults, discoveryResults) {
+function deduplicate(mongodbResults, repositoryResults, discoveryResults) {
+  // Legacy 2-pool call: deduplicate(mongodbResults, discoveryResults)
+  if (discoveryResults === undefined) {
+    discoveryResults = repositoryResults;
+    repositoryResults = [];
+  }
+
   const seen   = new Set();
   const merged = [];
 
-  for (const ds of mongodbResults) {
-    const key = `${ds.source}:${ds.source_id}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push({ ...ds, _source: 'mongodb' });
-    }
-  }
+  const pools = [
+    [mongodbResults,    'mongodb'],
+    [repositoryResults, 'repository'],
+    [discoveryResults,  'discovery'],
+  ];
 
-  for (const ds of discoveryResults) {
-    const key = `${ds.source}:${ds.source_id}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push({ ...ds, _source: 'discovery' });
+  for (const [pool, label] of pools) {
+    for (const ds of pool || []) {
+      const key = `${ds.source}:${ds.source_id}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        merged.push({ ...ds, _source: label });
+      }
     }
   }
 
   return merged;
 }
 
-// ---------- Final ranking (§9.6) ----------
+// ---------- Final ranking (§9.6 / §4.5) ----------
 
 /**
  * Merge, deduplicate, score, sort, and return top 20 results.
  *
- * @param {Object[]} mongodbResults   - from MongoDB search before discovery
- * @param {Object[]} discoveryResults - net-new results after discovery agent ran
- * @param {Object}   filters          - QueryFilters from parseQuery
+ * §4.5: rank now accepts THREE pools (Mongo first, then repository, then web).
+ * Weights/formula unchanged from §9.3.
+ *
+ * Backward-compatible: the legacy 3-arg call rank(mongo, discovery, filters)
+ * is still supported (repository pool omitted).
+ *
+ * @param {Object[]} mongodbResults    - from MongoDB search before discovery
+ * @param {Object[]} repositoryResults - repository tier results (§4.2)
+ * @param {Object[]} discoveryResults  - net-new results after web discovery ran
+ * @param {Object}   filters           - QueryFilters from parseQuery
  * @returns {Object[]} ranked datasets with _rankingScore, _source, _matchDetails
  */
-function rank(mongodbResults, discoveryResults, filters) {
-  const merged = deduplicate(mongodbResults, discoveryResults);
+function rank(mongodbResults, repositoryResults, discoveryResults, filters) {
+  // Legacy 3-arg call: rank(mongodbResults, discoveryResults, filters)
+  if (!Array.isArray(discoveryResults)) {
+    filters = discoveryResults;
+    discoveryResults = repositoryResults;
+    repositoryResults = [];
+  }
+
+  const merged = deduplicate(mongodbResults, repositoryResults, discoveryResults);
   if (merged.length === 0) return [];
 
   const weights = getWeights();

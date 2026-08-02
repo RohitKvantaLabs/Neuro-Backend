@@ -94,8 +94,19 @@ module.exports = {
     diversityWeight: parseFloat(process.env.RE_DIVERSITY_WEIGHT) || 0.05,
   },
 
-  // Feature flag — toggle between new orchestrator and legacy search (§18.5)
+  // Feature flags — toggle between new orchestrator and legacy search (§18.5),
+  // and the two-tier repository layer (§5.2). Repository layer only activates
+  // when BOTH useNewOrchestrator and useRepositoryLayer are on (§4.10).
   featureFlags: {
-    useNewOrchestrator: process.env.FF_USE_NEW_ORCHESTRATOR === 'true',
+    useNewOrchestrator: process.env.FF_USE_NEW_ORCHESTRATOR === 'true',  // existing
+    useRepositoryLayer: process.env.FF_USE_REPOSITORY_LAYER === 'true',  // NEW (§5.2)
+    useWebDiscovery:    process.env.FF_USE_WEB_DISCOVERY !== 'false',    // NEW (§5.2), default true
+  },
+
+  // §5.2 — Repository Retrieval tier (two-tier discovery: repositories first, web second)
+  repositoryRetrieval: {
+    enabledSources: (process.env.REPO_ENABLED_SOURCES || 'openneuro,dandi,neurovault,ebrains,zenodo,figshare,dryad,osf,nitrc').split(','),
+    limitPerSource: parseInt(process.env.REPO_LIMIT_PER_SOURCE, 10) || 10,
+    cacheTtlMs:     parseInt(process.env.REPO_CACHE_TTL_MS, 10) || 5 * 60 * 1000,
   },
 };

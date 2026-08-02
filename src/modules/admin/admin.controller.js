@@ -6,6 +6,7 @@ const QueryLog = require('../queryLog/queryLog.model');
 const ApiError = require('../../utils/ApiError');
 const ApiResponse = require('../../utils/ApiResponse');
 const asyncHandler = require('../../utils/asyncHandler');
+const logger = require('../../utils/logger');
 const { TtlCache } = require('../../utils/ttlCache');
 
 // In-memory cache for the public /repositories endpoint.
@@ -19,6 +20,7 @@ const { sendOtpEmail } = require('../../utils/mailer');
 const env = require('../../config/env.config');
 const { signAccessToken, signRefreshToken, REFRESH_COOKIE_NAME, REFRESH_COOKIE_OPTIONS } = require('../auth/auth.service');
 const { logAdminAction } = require('../../utils/auditLog.util');
+const { runRepositorySync } = require('../agent/agent.client');
 const AuditLog = require('./auditLog.model');
 const Repository = require('./repository.model');
 const SupportTicket = require('./supportTicket.model');
@@ -227,14 +229,103 @@ const deleteRepository = asyncHandler(async (req, res) => {
   return new ApiResponse(200, null, 'Repository deleted.').send(res);
 });
 
+// Map an admin Repository to the Python connector source key (§4.7).
+// Prefer an explicit endpoint_config.source, else derive from the name
+// (e.g. 'OpenNeuro' → 'openneuro'). NOTE: seeded display names don't always
+// slug to a Python connector key ('DANDI Archive' → 'dandi-archive' ≠ 'dandi');
+// set endpoint_config.source on such documents so the pre-check in
+// resyncRepository passes and the connector is actually synced.
+function _repoSourceKey(repo) {
+  if (repo.endpoint_config && typeof repo.endpoint_config.source === 'string' && repo.endpoint_config.source.trim()) {
+    return repo.endpoint_config.source.trim();
+  }
+  return String(repo.name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
 const resyncRepository = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  // ponytail: only flips the flag — real trigger to Python is a follow-up (§11.1)
-  const repo = await Repository.findByIdAndUpdate(id, { sync_status: 'syncing' }, { new: true });
+  const repo = await Repository.findById(id);
   if (!repo) throw new ApiError(404, 'Repository not found.');
+
+  // Flip to syncing first so the UI reflects the in-flight state (§4.7).
+  await Repository.findByIdAndUpdate(id, { sync_status: 'syncing' }, { new: true });
   _reposCache.delete(REPOS_CACHE_KEY);
-  logAdminAction(req.user.id, 'repo.resync', 'repository', id, { name: repo.name });
-  return new ApiResponse(200, repo, 'Resync initiated.').send(res);
+
+  const sourceKey = _repoSourceKey(repo);
+
+  // Pre-check: only repos backed by an enabled Python connector are synced.
+  // Display-only repos (e.g. NEMAR, Allen Brain Atlas) skip the HTTP call and
+  // are reported offline with a clear reason instead of a wasted Python hit.
+  const enabledSources = env.repositoryRetrieval?.enabledSources || [];
+  if (!enabledSources.includes(sourceKey)) {
+    const skipped = await Repository.findByIdAndUpdate(
+      id,
+      { sync_status: 'offline', last_sync_at: new Date() },
+      { new: true }
+    );
+    _reposCache.delete(REPOS_CACHE_KEY);
+    logAdminAction(req.user.id, 'repo.resync', 'repository', id, {
+      name: repo.name,
+      source: sourceKey,
+      status: 'offline',
+      reason: 'no_enabled_connector',
+    });
+    return new ApiResponse(200, skipped, 'No enabled connector for this repository — marked offline.').send(res);
+  }
+
+  try {
+    // Real trigger — POST /agents/repository-sync {source} (§4.7)
+    const syncResult = await runRepositorySync({ source: sourceKey });
+    const pipeline = syncResult?.results?.[sourceKey] || {};
+    // errors===0 → connector responded cleanly; a legitimately empty round is
+    // still "online". dataset_count is only refreshed when the sync produced
+    // new records, so neither a failed nor an empty sync wipes a seeded count.
+    const healthy = (pipeline.errors || 0) === 0;
+
+    const updated = await Repository.findByIdAndUpdate(
+      id,
+      {
+        sync_status: healthy ? 'online' : 'offline',
+        last_sync_at: new Date(),
+        dataset_count: healthy && typeof pipeline.upserted === 'number' && pipeline.upserted > 0
+          ? pipeline.upserted
+          : repo.dataset_count || 0,
+      },
+      { new: true }
+    );
+    _reposCache.delete(REPOS_CACHE_KEY);
+    logAdminAction(req.user.id, 'repo.resync', 'repository', id, {
+      name: repo.name,
+      source: sourceKey,
+      fetched: pipeline.fetched || 0,
+      upserted: pipeline.upserted || 0,
+      errors: pipeline.errors || 0,
+      status: updated.sync_status,
+    });
+    return new ApiResponse(
+      200,
+      updated,
+      healthy ? 'Resync completed.' : 'Resync completed with errors — repository marked offline.'
+    ).send(res);
+  } catch (err) {
+    logger.error(`Resync failed for repository "${repo.name}" (source=${sourceKey}): ${err.message}`);
+    const failed = await Repository.findByIdAndUpdate(
+      id,
+      { sync_status: 'offline', last_sync_at: new Date() },
+      { new: true }
+    );
+    _reposCache.delete(REPOS_CACHE_KEY);
+    logAdminAction(req.user.id, 'repo.resync', 'repository', id, {
+      name: repo.name,
+      source: sourceKey,
+      status: 'offline',
+      error: err.message,
+    });
+    return new ApiResponse(200, failed, 'Resync failed — repository marked offline.').send(res);
+  }
 });
 
 // ─── Analytics (§11.5) ────────────────────────────────────────────────────────

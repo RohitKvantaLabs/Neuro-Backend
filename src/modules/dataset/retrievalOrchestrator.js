@@ -21,10 +21,11 @@
  */
 
 const logger                                      = require('../../utils/logger');
-const { parseQuery, runFallbackSearch }           = require('../agent/agent.client');
+const env                                         = require('../../config/env.config');
+const { parseQuery, runFallbackSearch, runRepositorySearch } = require('../agent/agent.client');
 const { searchMongoDB }                           = require('./dataset.service');
 const { analyzeQueryComplexity }                  = require('./queryComplexityAnalyzer');
-const { computeRetrievalQuality, evaluate }       = require('./discoveryPolicy');
+const { computeRetrievalQuality, evaluate, evaluateAfterRepositories } = require('./discoveryPolicy');
 const { rank }                                    = require('./rankingEngine');
 
 /**
@@ -126,37 +127,68 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
   );
 
   // ──────────────────────────────────────────────
-  // Step 6: External Discovery (if needed)
-  // Option A: runFallbackSearch → Python writes to MongoDB → re-query → diff
+  // Step 6: Two-tier Discovery (if needed) — §4.4
+  // Tier 1: repository search (free, fast) → Tier 2: web discovery only if
+  // the combined Mongo+repo pool still fails the raised post-repo bar.
   // ──────────────────────────────────────────────
+  let repositoryResults = [];
   let discoveryResults = [];
 
   if (discoveryDecision.shouldDiscover) {
-    const originalKeys = buildKeySet(mongodbResults);
+    // Tier 1: repository search (§4.4) — gated by FF_USE_REPOSITORY_LAYER.
+    if (env.featureFlags?.useRepositoryLayer && typeof runRepositorySearch === 'function') {
+      try {
+        const repoRes = await runRepositorySearch({ query, filters, userId, userEmail });
+        repositoryResults = Array.isArray(repoRes?.datasets) ? repoRes.datasets : [];
+        logger.info(`[Orchestrator] Repository tier complete — ${repositoryResults.length} datasets`);
+      } catch (err) {
+        // §7.5: repo failure → degrade to web tier
+        logger.warn(`[Orchestrator] Repository search failed: ${err.message} — skipping repo tier`);
+        repositoryResults = [];
+      }
+    }
 
+    // Tier 2: web discovery only if repositories didn't satisfy quality (§4.4).
+    const combined = [...mongodbResults, ...repositoryResults];
+    const postRepoQuality = computeRetrievalQuality(combined, filters, complexity);
+    let webDecision;
     try {
-      await runFallbackSearch({ query, filters, userId, userEmail });
-
-      // Re-query MongoDB to pick up datasets the agent just wrote
-      const afterResults = await searchMongoDB(filters);
-
-      // Net-new datasets = those present after discovery but not before
-      discoveryResults = extractNetNew(afterResults, originalKeys);
-
-      logger.info(`[Orchestrator] Discovery complete — net-new datasets: ${discoveryResults.length}`);
+      webDecision = evaluateAfterRepositories(postRepoQuality, filters, {
+        queryComplexity: complexity,
+        freshnessRequirement: complexity.freshness,
+      });
     } catch (err) {
-      // §7.5: Discovery failure → return MongoDB results only, log error
-      logger.error(`[Orchestrator] Discovery agent failed: ${err.message} — falling back to MongoDB results only`);
-      discoveryDecision = { ...discoveryDecision, shouldDiscover: false, reason: 'discovery_error' };
+      // Conservative default: run web discovery if post-repo policy fails
+      logger.warn(`[Orchestrator] Post-repo policy evaluation failed: ${err.message} — defaulting to web discovery`);
+      webDecision = { shouldDiscoverWeb: true, reason: 'policy_error', confidence: 0, signals: [] };
+    }
+
+    if (webDecision.shouldDiscoverWeb) {
+      try {
+        await runFallbackSearch({ query, filters, userId, userEmail });
+
+        // Re-query MongoDB to pick up datasets the agent just wrote
+        const afterResults = await searchMongoDB(filters);
+
+        // Net-new datasets = those present after web discovery but not before
+        // (mongo + repo keys are the baseline)
+        discoveryResults = extractNetNew(afterResults, buildKeySet(combined));
+
+        logger.info(`[Orchestrator] Web discovery complete — net-new datasets: ${discoveryResults.length}`);
+      } catch (err) {
+        // §7.5: Web discovery failure → return Mongo+repo results only, log error
+        logger.error(`[Orchestrator] Web discovery failed: ${err.message} — falling back to Mongo+repo results only`);
+        discoveryDecision = { ...discoveryDecision, shouldDiscover: false, reason: 'discovery_error' };
+      }
     }
   }
 
   // ──────────────────────────────────────────────
-  // Step 7: Layer 3 — Merge + Rank
+  // Step 7: Layer 3 — Merge (3 pools) + Rank (§4.5)
   // ──────────────────────────────────────────────
   let rankedResults;
   try {
-    rankedResults = rank(mongodbResults, discoveryResults, filters);
+    rankedResults = rank(mongodbResults, repositoryResults, discoveryResults, filters);
   } catch (err) {
     // §7.5: Ranking failure → return unranked merged results
     logger.error(`[Orchestrator] Layer 3 ranking failed: ${err.message} — returning unranked`);
@@ -167,10 +199,11 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
   }
 
   // ──────────────────────────────────────────────
-  // Step 8: Return OrchestratorResult (§7.3)
+  // Step 8: Return OrchestratorResult (§7.3) — source is 'merged' when the
+  // repository or web tier contributed anything (§4.7).
   // ──────────────────────────────────────────────
-  const source = discoveryDecision.shouldDiscover
-    ? (discoveryResults.length > 0 ? 'merged' : 'cache')
+  const source = (repositoryResults.length > 0 || discoveryResults.length > 0)
+    ? 'merged'
     : 'cache';
 
   return {
@@ -180,6 +213,7 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
     metrics: {
       totalFound:       rankedResults.length,
       fromMongoDB:      mongodbResults.length,
+      fromRepository:   repositoryResults.length,
       fromDiscovery:    discoveryResults.length,
       queryComplexity:  complexity.level,
       qualityScore:     quality.avgMetadataCompleteness,

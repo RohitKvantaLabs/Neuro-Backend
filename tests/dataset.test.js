@@ -1,3 +1,10 @@
+// These tests target the LEGACY search path (source 'cache' / 'agent'), which
+// §4.10 guarantees stays byte-for-byte when FF_USE_NEW_ORCHESTRATOR is off.
+// Pin it here so the suite is hermetic regardless of the local .env setting;
+// the new orchestrator path has its own integration tests in
+// retrievalOrchestrator.test.js (§4.11).
+process.env.FF_USE_NEW_ORCHESTRATOR = 'false';
+
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 
