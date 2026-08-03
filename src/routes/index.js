@@ -23,8 +23,8 @@ router.use('/announcements', announcementRoutes);
 // §public — repository list for landing page; no auth required
 router.get('/repositories', listRepositories);
 
-// §10.2: Dataset search gated by auth + onboarding (per original §2 + §10.2)
-router.use('/datasets', requireAuth, requireOnboardingComplete, datasetRoutes);
+// §10.2: Dataset search & subroutes handled by datasetRoutes
+router.use('/datasets', datasetRoutes);
 
 router.use('/query-logs', queryLogRoutes);
 // ponytail: /stream SSE route unmounted — replaced by blocking search flow
