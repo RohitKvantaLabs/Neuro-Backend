@@ -5,7 +5,10 @@ const queryLogSchema = new mongoose.Schema(
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }, // null for anonymous searches, if allowed
     rawQuery: { type: String, required: true },
     filters: { type: mongoose.Schema.Types.Mixed, default: {} },
-    resultSource: { type: String, enum: ['cache', 'fallback'], required: true },
+    // resultSource values written by dataset.controller.js:
+    //   legacy path   → 'cache' | 'fallback'
+    //   new orchestrator (FF_USE_NEW_ORCHESTRATOR=true) → orchestratorResult.source, which is 'cache' | 'merged'
+    resultSource: { type: String, enum: ['cache', 'fallback', 'merged'], required: true },
     resultCount: { type: Number, default: 0 },
   },
   { timestamps: true }

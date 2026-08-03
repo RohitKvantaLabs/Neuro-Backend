@@ -334,7 +334,7 @@ const getAnalytics = asyncHandler(async (req, res) => {
   const since = new Date();
   since.setDate(since.getDate() - 60);
 
-  const [series, users, saved, collections, cacheCount, fallbackCount] = await Promise.all([
+  const [series, users, saved, collections, cacheCount, fallbackCount, mergedCount] = await Promise.all([
     QueryLog.aggregate([
       { $match: { createdAt: { $gte: since } } },
       {
@@ -352,12 +352,15 @@ const getAnalytics = asyncHandler(async (req, res) => {
     require('../user/collection.model').countDocuments(),
     QueryLog.countDocuments({ resultSource: 'cache' }),
     QueryLog.countDocuments({ resultSource: 'fallback' }),
+    // New orchestrator results (§4.7) log as 'merged' — counted so the
+    // cache-hit KPI denominator includes them (they are not cache hits).
+    QueryLog.countDocuments({ resultSource: 'merged' }),
   ]);
 
-  const total = cacheCount + fallbackCount;
+  const total = cacheCount + fallbackCount + mergedCount;
   const cacheHitRate = total > 0 ? cacheCount / total : 0;
 
-  return new ApiResponse(200, { series, users, saved, collections, cacheHitRate }).send(res);
+  return new ApiResponse(200, { series, users, saved, collections, cacheHitRate, mergedCount }).send(res);
 });
 
 // ─── Dashboard (§11.8) ────────────────────────────────────────────────────────
