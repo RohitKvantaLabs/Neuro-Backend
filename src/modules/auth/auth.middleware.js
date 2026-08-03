@@ -42,4 +42,23 @@ function requireAdmin(req, res, next) {
   return next();
 }
 
-module.exports = { requireAuth, requireAdmin };
+/**
+ * Optional authentication middleware.
+ * Attaches req.user if a valid Bearer token is provided, but continues gracefully if absent or invalid.
+ */
+function optionalAuth(req, res, next) {
+  const header = req.headers.authorization;
+  if (header && header.startsWith('Bearer ')) {
+    const token = header.split(' ')[1];
+    try {
+      req.user = verifyAccessToken(token);
+    } catch {
+      req.user = null;
+    }
+  } else {
+    req.user = null;
+  }
+  return next();
+}
+
+module.exports = { requireAuth, requireAdmin, optionalAuth };
