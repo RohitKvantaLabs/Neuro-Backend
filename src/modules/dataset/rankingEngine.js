@@ -7,24 +7,43 @@
  *
  * Architecture ref: §9 "Layer 3 Ranking Engine Design"
  *
- * Formula (§9.3) — rebalanced 2026-08-04 (stabilization Phase 5):
+ * Formula (§9.3) — query-first rebalance 2026-08-04 (stabilization Issue 1):
  *
- *   BEFORE (favored shallow keyword matches):
+ *   BEFORE Phase 5 (favored shallow keyword matches):
  *     final_score = matchScore*0.50 + qualityScore*0.20 +
  *                   freshnessScore*0.15 + trustScore*0.10 + diversityBonus*0.05
  *
- *   AFTER (repository authority + dataset quality + semantic relevance first):
+ *   Phase 5 (repository authority first — allowed unrelated datasets to
+ *   outrank exact matches, the defect this session fixes):
  *     final_score = matchScore*0.30 + qualityScore*0.25 +
  *                   trustScore*0.20 + freshnessScore*0.15 + diversityBonus*0.10
  *
- * Rationale: match (free-text/token coincidence) no longer dominates — a
- * verified repository dataset with rich metadata outranks a shallow
- * keyword-coincidence MongoDB record. Semantic relevance stays the largest
- * single component, but metadata completeness (quality), repository
- * authority (trust), and diversity now carry meaningful weight.
+ *   AFTER (QUERY-FIRST):
+ *     final_score = matchScore*0.60 + qualityScore*0.15 +
+ *                   trustScore*0.10 + freshnessScore*0.10 + diversityBonus*0.05
+ *
+ * Query relevance is the dominant ranking factor. matchScore itself is now
+ * graded (Issue 2 — exact matches carry an explicit premium): a requested
+ * modality/disease/task/region/species that matches exactly scores 1.0 per
+ * field, a *declared but non-matching* modality/species scores partial credit
+ * (0.35/0.30 — evidence exists, so it is penalized, not excluded), and no
+ * declaration scores 0. For "Parkinson disease MEG" (incl. the +0.10
+ * exact-match premium per exact field): Parkinson+MEG (1.0) >
+ * Parkinson+MRI (0.775) > generic Parkinson (0.60) > unrelated (0).
+ *
+ * Determinism (Issue 5): the final sort uses stable tie-breakers —
+ * FinalScore DESC → QueryMatch DESC → Quality DESC → Trust DESC →
+ * Freshness DESC → Title ASC → Repository ASC → source_id ASC — so repeated
+ * identical searches produce identical ordering unless the data changes.
+ *
+ * Observability (Issue 6): in development mode only, a structured
+ * ranking.diagnostics log records per-dataset components (dataset,
+ * repository, final score, query match, modality/disease/task/region match,
+ * quality, trust, freshness, diversity).
  */
 
 const env = require('../../config/env.config');
+const logger = require('../../utils/logger');
 
 /**
  * Modality synonym families (mirrors Neuro-Agents app/connectors/base.py
@@ -64,13 +83,68 @@ function modalityOverlap(requested, declared) {
   return r.includes(d) || d.includes(r); // fuzzy fallback ("mri" vs "functional mri")
 }
 
+/**
+ * Stem-aware region overlap (Issue 2 — brain region exact matches are
+ * prioritized). Region values come from Stage-3 vocabulary enrichment
+ * (``hippocampal``, ``motor cortex``) while the parser may emit a different
+ * morphological form (``hippocampus``, ``motor cortex``). Matches on exact,
+ * substring containment, or a shared token prefix of >= 5 chars (``hippocampus``
+ * ↔ ``hippocampal`` share ``hippocamp``).
+ */
+function regionOverlap(requested, declared) {
+  const r = String(requested || '').toLowerCase().trim();
+  const d = String(declared || '').toLowerCase().trim();
+  if (!r || !d) return false;
+  if (r === d || r.includes(d) || d.includes(r)) return true;
+  const rt = r.split(/\s+/);
+  const dt = d.split(/\s+/);
+  for (const a of rt) {
+    for (const b of dt) {
+      let i = 0;
+      while (i < a.length && i < b.length && a[i] === b[i]) i++;
+      if (i >= 5) return true;
+    }
+  }
+  return false;
+}
+
+// Query-first weights (§9.3, stabilization Issue 1): query relevance is the
+// dominant component; metadata quality, repository trust, freshness, and
+// diversity are secondary. Mirrored in env.config.js rankingEngine defaults.
 const DEFAULT_WEIGHTS = {
-  match:     0.30,
-  quality:   0.25,
-  trust:     0.20,
-  freshness: 0.15,
-  diversity: 0.10,
+  match:     0.60,
+  quality:   0.15,
+  trust:     0.10,
+  freshness: 0.10,
+  diversity: 0.05,
 };
+
+// Per-field relative importance inside matchScore (Issue 2). The requested
+// modality and condition (disease) are the strongest relevance signals;
+// task/region/species follow; age_range/format/keywords are weaker.
+const FIELD_WEIGHTS = {
+  modality:  1.0,
+  condition: 1.0,
+  task:      0.8,
+  region:    0.8,
+  species:   0.6,
+  age_range: 0.4,
+  format:    0.3,
+  keywords:  0.5,
+};
+
+// Exact-match premium (Issue 2): every requested field that matches exactly
+// adds a flat bonus on top of the weighted credit average, so exact hits
+// clearly outrank partial evidence. Capped so the score stays in [0,1].
+const EXACT_MATCH_BONUS = 0.10;
+const MAX_EXACT_PREMIUM = 0.30;
+
+// Partial credit when a *declared* modality/species exists but does not match
+// the request: the record carries modality evidence, so it is penalized but
+// not excluded (Issue 4). This is what separates "Parkinson + MRI" from
+// "generic Parkinson" when MEG is requested.
+const MODALITY_PARTIAL_CREDIT = 0.35;
+const SPECIES_PARTIAL_CREDIT  = 0.30;
 
 function getWeights() {
   const re = env.rankingEngine || {};
@@ -87,12 +161,27 @@ function getWeights() {
 
 /**
  * MatchScore (§9.4.1) — how well a dataset covers the requested filter fields.
+ *
+ * Query-first grading (stabilization Issue 2): each requested field
+ * contributes a graded credit (0..1) instead of a binary hit/miss, so exact
+ * matches carry an explicit premium over partial evidence:
+ *   - modality: 1.0 on synonym-family match, 0.35 when a modality is declared
+ *     but does not match the request (evidence exists → penalty, not zero),
+ *     0 when nothing is declared.
+ *   - species: 1.0 exact, 0.30 declared-but-different, 0 none.
+ *   - condition / task / region / age_range / format / keywords: 1.0 match,
+ *     else 0.
+ * Score = weighted-credit average + exact-match premium (capped at 1.0).
+ * ``matchDetails`` keeps the boolean per-field map and adds ``credits``.
  */
 function computeMatchScore(dataset, filters) {
   const FILTER_FIELDS = ['modality', 'species', 'condition', 'task', 'region', 'age_range', 'format'];
   let matchedCount = 0;
   let requestedCount = 0;
+  let weightedCredit = 0;
+  let totalWeight = 0;
   const matchDetails = {};
+  const credits = {};
 
   for (const field of FILTER_FIELDS) {
     const requested = filters[field];
@@ -101,32 +190,75 @@ function computeMatchScore(dataset, filters) {
     requestedCount++;
     const values = Array.isArray(requested) ? requested : [requested];
     let matched = false;
+    let credit = 0;
 
     if (field === 'modality') {
-      matched = values.some((v) =>
-        (dataset.modality || []).some((m) => modalityOverlap(v, m)));
+      const declared = dataset.modality || [];
+      if (values.some((v) => declared.some((m) => modalityOverlap(v, m)))) {
+        matched = true;
+        credit = 1;
+      } else if (declared.length > 0) {
+        credit = MODALITY_PARTIAL_CREDIT; // declared but different family — partial evidence
+      }
     } else if (field === 'species') {
-      matched = values.some((v) => (dataset.species || []).some((s) => s.toLowerCase() === v.toLowerCase()));
+      const declared = dataset.species || [];
+      if (values.some((v) => declared.some((s) => s.toLowerCase() === v.toLowerCase()))) {
+        matched = true;
+        credit = 1;
+      } else if (declared.length > 0) {
+        credit = SPECIES_PARTIAL_CREDIT;
+      }
     } else if (field === 'condition') {
+      // Bidirectional overlap: the parser may emit "Parkinson disease" while
+      // Stage-3 enrichment stores the canonical label "parkinson" (or vice
+      // versa). Match when either side contains the other.
+      matched = values.some((v) => {
+        const vl = v.toLowerCase();
+        const dl = (dataset.disease || '').toLowerCase();
+        if (dl && (dl.includes(vl) || vl.includes(dl))) return true;
+        return (dataset.keywords || []).some((k) => {
+          const kl = k.toLowerCase();
+          return kl.includes(vl) || vl.includes(kl);
+        });
+      });
+      credit = matched ? 1 : 0;
+    } else if (field === 'task') {
+      // Task evidence lives in keywords AND the free-text title/description
+      // (e.g. "Working memory capacity in adolescents (fMRI)").
       matched = values.some((v) => {
         const vl = v.toLowerCase();
         return (
-          (dataset.disease || '').toLowerCase().includes(vl) ||
-          (dataset.keywords || []).some((k) => k.toLowerCase().includes(vl))
+          (dataset.keywords || []).some((k) => k.toLowerCase().includes(vl)) ||
+          (dataset.title || '').toLowerCase().includes(vl) ||
+          (dataset.description || '').toLowerCase().includes(vl)
         );
       });
-    } else if (field === 'task') {
-      matched = values.some((v) => (dataset.keywords || []).some((k) => k.toLowerCase().includes(v.toLowerCase())));
+      credit = matched ? 1 : 0;
     } else if (field === 'region') {
-      matched = values.some((v) => (dataset.region || '').toLowerCase().includes(v.toLowerCase()));
+      matched = values.some((v) => (dataset.region ? regionOverlap(v, dataset.region) : false));
+      credit = matched ? 1 : 0;
     } else if (field === 'age_range') {
       matched = values.some((v) => (dataset.age_group || '').toLowerCase().includes(v.toLowerCase()));
+      credit = matched ? 1 : 0;
     } else if (field === 'format') {
-      matched = values.some((v) => (dataset.keywords || []).some((k) => k.toLowerCase().includes(v.toLowerCase())));
+      // Format evidence (NIfTI / BIDS / DICOM) can also appear in free text.
+      matched = values.some((v) => {
+        const vl = v.toLowerCase();
+        return (
+          (dataset.keywords || []).some((k) => k.toLowerCase().includes(vl)) ||
+          (dataset.title || '').toLowerCase().includes(vl) ||
+          (dataset.description || '').toLowerCase().includes(vl)
+        );
+      });
+      credit = matched ? 1 : 0;
     }
 
     matchDetails[field] = matched;
+    credits[field] = credit;
     if (matched) matchedCount++;
+    const w = FIELD_WEIGHTS[field] || 0;
+    totalWeight += w;
+    weightedCredit += credit * w;
   }
 
   // Keyword free-text matching (§9.4.1)
@@ -141,13 +273,20 @@ function computeMatchScore(dataset, filters) {
       );
     });
     matchDetails.keywords = kwMatched;
+    credits.keywords = kwMatched ? 1 : 0;
     if (kwMatched) matchedCount++;
+    const w = FIELD_WEIGHTS.keywords || 0;
+    totalWeight += w;
+    weightedCredit += (kwMatched ? 1 : 0) * w;
   }
 
-  const score     = requestedCount > 0 ? matchedCount / requestedCount : 0.5;
+  // Neutral 0.5 when nothing was requested; otherwise graded average + premium.
+  const baseScore  = totalWeight > 0 ? weightedCredit / totalWeight : 0.5;
+  const exactPremium = totalWeight > 0 ? Math.min(EXACT_MATCH_BONUS * matchedCount, MAX_EXACT_PREMIUM) : 0;
+  const score      = totalWeight > 0 ? Math.min(baseScore + exactPremium, 1) : 0.5;
   const matchRatio = requestedCount > 0 ? matchedCount / requestedCount : 0;
 
-  return { score, matchCount: matchedCount, requestedCount, matchRatio, matchDetails };
+  return { score, matchCount: matchedCount, requestedCount, matchRatio, matchDetails, credits, baseScore };
 }
 
 /**
@@ -193,9 +332,9 @@ function computeTrustScore(dataset) {
 /**
  * DiversityBonus (§9.4.5) — boost underrepresented sources.
  *
- * Rebalanced 2026-08-04 (Phase 5): values scaled up to be effective under the
- * new diversityWeight of 0.10 (the old max 0.05 × 0.05 weight contributed at
- * most 0.0025 — a rounding error).
+ * Values scaled so the bonus stays effective under the current (query-first)
+ * diversityWeight of 0.05: a singleton source contributes up to 0.50 × 0.05
+ * = 0.025, enough to resolve near-ties without dominating relevance.
  */
 function computeDiversityBonus(dataset, sourceCounts) {
   const source = dataset.source || 'unknown';
@@ -247,6 +386,61 @@ function deduplicate(mongodbResults, repositoryResults, discoveryResults) {
   }
 
   return merged;
+}
+
+// ---------- Deterministic comparator (§9.6, Issue 5) ----------
+
+/**
+ * Stable tie-breaker chain so repeated identical searches return the same
+ * order unless the underlying data changes:
+ * FinalScore DESC → QueryMatch DESC → Quality DESC → Trust DESC →
+ * Freshness DESC → Title ASC → Repository ASC → source_id ASC.
+ */
+function compareRanked(a, b) {
+  if (b._rankingScore !== a._rankingScore) return b._rankingScore - a._rankingScore;
+  if (b._matchScore !== a._matchScore)     return b._matchScore - a._matchScore;
+  if (b._qualityScore !== a._qualityScore) return b._qualityScore - a._qualityScore;
+  if (b._trustScore !== a._trustScore)     return b._trustScore - a._trustScore;
+  if (b._freshnessScore !== a._freshnessScore) return b._freshnessScore - a._freshnessScore;
+  const byTitle  = String(a.title || '').localeCompare(String(b.title || ''));
+  if (byTitle !== 0) return byTitle;
+  const bySource = String(a.source || '').localeCompare(String(b.source || ''));
+  if (bySource !== 0) return bySource;
+  return String(a.source_id || '').localeCompare(String(b.source_id || ''));
+}
+
+// ---------- Ranking diagnostics (§9.6, Issue 6) ----------
+
+/**
+ * Structured ranking diagnostics — development mode only. Logs every Top-30
+ * dataset with its components: dataset, repository, final score, query match,
+ * modality/disease/task/region match, quality, trust, freshness, diversity.
+ * Never breaks ranking: failures are swallowed.
+ */
+function logRankingDiagnostics(filters, scored) {
+  if (env.nodeEnv !== 'development') return;
+  try {
+    logger.info(`[RankingEngine] ${JSON.stringify({
+      event: 'ranking.diagnostics',
+      query: (filters && filters.raw_query) || '',
+      top: scored.slice(0, 30).map((d) => ({
+        dataset:       d.title || d.source_id || '',
+        repository:    d.source || '',
+        finalScore:    d._rankingScore,
+        queryMatch:    d._matchScore,
+        modalityMatch: d._matchDetails && d._matchDetails.modality !== undefined ? d._matchDetails.modality : null,
+        diseaseMatch:  d._matchDetails && d._matchDetails.condition !== undefined ? d._matchDetails.condition : null,
+        taskMatch:     d._matchDetails && d._matchDetails.task !== undefined ? d._matchDetails.task : null,
+        regionMatch:   d._matchDetails && d._matchDetails.region !== undefined ? d._matchDetails.region : null,
+        quality:       d._qualityScore,
+        trust:         d._trustScore,
+        freshness:     d._freshnessScore,
+        diversity:     d._diversityBonus,
+      })),
+    })}`);
+  } catch (err) {
+    logger.warn(`[RankingEngine] diagnostics logging failed: ${err.message}`);
+  }
 }
 
 // ---------- Final ranking (§9.6 / §4.5) ----------
@@ -304,8 +498,16 @@ function rank(mongodbResults, repositoryResults, discoveryResults, filters) {
     return {
       ...dataset,
       _rankingScore: Math.round(finalScore * 10000) / 10000,
+      // Component scores — used by the deterministic tie-breakers (Issue 5)
+      // and the dev-mode diagnostics log (Issue 6).
+      _matchScore:    Math.round(matchResult.score * 10000) / 10000,
+      _qualityScore:  Math.round(qualityScore * 10000) / 10000,
+      _trustScore:    Math.round(trustScore * 10000) / 10000,
+      _freshnessScore: Math.round(freshnessScore * 10000) / 10000,
+      _diversityBonus: diversityBonus,
       _matchDetails: {
         ...matchResult.matchDetails,
+        credits:       matchResult.credits,
         matchCount:    matchResult.matchCount,
         requestedCount: matchResult.requestedCount,
         matchRatio:    matchResult.matchRatio,
@@ -313,8 +515,9 @@ function rank(mongodbResults, repositoryResults, discoveryResults, filters) {
     };
   });
 
-  // Sort descending by score, return top 30
-  scored.sort((a, b) => b._rankingScore - a._rankingScore);
+  // Deterministic sort: score DESC, then the stable tie-breaker chain.
+  scored.sort(compareRanked);
+  logRankingDiagnostics(filters, scored);
   return scored.slice(0, 30);
 }
 
@@ -326,4 +529,5 @@ module.exports = {
   computeFreshnessScore,
   computeTrustScore,
   modalityOverlap,
+  regionOverlap,
 };

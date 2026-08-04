@@ -86,18 +86,18 @@ module.exports = {
   },
 
   // Retrieval Orchestrator — Layer 3 Ranking weights (§Appendix C)
-  // Rebalanced 2026-08-04 (stabilization Phase 5): repository authority,
-  // dataset quality, semantic relevance, and metadata completeness are
-  // prioritized over shallow keyword matches. These values ARE the
-  // application-logic defaults (mirrored in rankingEngine.js DEFAULT_WEIGHTS);
-  // optional RE_* env overrides still work for ops tuning but are NOT
-  // required to define the approved weights.
+  // Query-first rebalance 2026-08-04 (stabilization Issue 1): query
+  // relevance is now the dominant ranking factor (0.60); metadata quality,
+  // repository trust, freshness, and diversity are secondary. These values
+  // ARE the application-logic defaults (mirrored in rankingEngine.js
+  // DEFAULT_WEIGHTS); optional RE_* env overrides still work for ops tuning
+  // but are NOT required to define the approved weights.
   rankingEngine: {
-    matchWeight:     parseFloat(process.env.RE_MATCH_WEIGHT)     || 0.30,
-    qualityWeight:   parseFloat(process.env.RE_QUALITY_WEIGHT)   || 0.25,
-    freshnessWeight: parseFloat(process.env.RE_FRESHNESS_WEIGHT) || 0.15,
-    trustWeight:     parseFloat(process.env.RE_TRUST_WEIGHT)     || 0.20,
-    diversityWeight: parseFloat(process.env.RE_DIVERSITY_WEIGHT) || 0.10,
+    matchWeight:     parseFloat(process.env.RE_MATCH_WEIGHT)     || 0.60,
+    qualityWeight:   parseFloat(process.env.RE_QUALITY_WEIGHT)   || 0.15,
+    freshnessWeight: parseFloat(process.env.RE_FRESHNESS_WEIGHT) || 0.10,
+    trustWeight:     parseFloat(process.env.RE_TRUST_WEIGHT)     || 0.10,
+    diversityWeight: parseFloat(process.env.RE_DIVERSITY_WEIGHT) || 0.05,
   },
 
   // Feature flags — toggle between new orchestrator and legacy search (§18.5),

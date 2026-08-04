@@ -8,12 +8,14 @@
  */
 jest.mock('../src/config/env.config', () => ({
   discoveryPolicy: {},
+  // nodeEnv intentionally omitted → not 'development' → ranking diagnostics
+  // (Issue 6) are skipped in tests.
   rankingEngine: {
-    matchWeight: 0.3,
-    qualityWeight: 0.25,
-    freshnessWeight: 0.15,
-    trustWeight: 0.2,
-    diversityWeight: 0.1,
+    matchWeight: 0.6,
+    qualityWeight: 0.15,
+    freshnessWeight: 0.1,
+    trustWeight: 0.1,
+    diversityWeight: 0.05,
   },
   featureFlags: {},
 }));
@@ -26,6 +28,7 @@ const {
   computeFreshnessScore,
   computeTrustScore,
   modalityOverlap,
+  regionOverlap,
 } = require('../src/modules/dataset/rankingEngine');
 
 // ---- Fixtures ------------------------------------------------------------
@@ -80,7 +83,7 @@ describe('computeMatchScore', () => {
     expect(result.requestedCount).toBe(0);
   });
 
-  it('scores proportionally for partial matches', () => {
+  it('scores proportionally for partial matches (graded modality credit)', () => {
     // condition also matches via keywords, so strip 'adhd' from keywords
     const result = computeMatchScore(
       makeDataset({ modality: ['EEG'], disease: 'none', keywords: ['resting-state'] }),
@@ -88,7 +91,12 @@ describe('computeMatchScore', () => {
     );
     expect(result.matchCount).toBe(0);
     expect(result.requestedCount).toBe(2);
-    expect(result.score).toBe(0);
+    // EEG is declared but not in the fMRI synonym family → 0.35 partial credit
+    // (evidence exists → penalized, not zero); condition misses → 0.
+    // base = (0.35*1 + 0*1) / 2 = 0.175, no exact premium (0 matches).
+    expect(result.score).toBeCloseTo(0.175);
+    expect(result.credits.modality).toBe(0.35);
+    expect(result.credits.condition).toBe(0);
   });
 
   it('matches case-insensitively for modality and species', () => {
@@ -109,13 +117,41 @@ describe('computeMatchScore', () => {
     expect(result.score).toBe(1);
   });
 
-  it('does not match modalities outside the synonym family', () => {
+  it('penalizes (not excludes) a declared modality outside the synonym family', () => {
     const result = computeMatchScore(
       makeDataset({ modality: ['eeg'] }),
       { modality: ['fMRI'] }
     );
     expect(result.matchDetails.modality).toBe(false);
-    expect(result.score).toBe(0);
+    // Declared-but-different modality gets partial evidence credit, not zero.
+    expect(result.score).toBeCloseTo(0.35);
+    expect(result.credits.modality).toBe(0.35);
+  });
+
+  it('a declared modality is closer to the request than none (Issue 4 hierarchy)', () => {
+    const exactMeg = computeMatchScore(makeDataset({ modality: ['MEG'] }), { modality: ['MEG'] });
+    const mriInstead = computeMatchScore(makeDataset({ modality: ['MRI'] }), { modality: ['MEG'] });
+    const none = computeMatchScore(makeDataset({ modality: [] }), { modality: ['MEG'] });
+    // Exact match > declared-but-different > no declaration.
+    expect(exactMeg.score).toBe(1);
+    expect(mriInstead.score).toBeGreaterThan(none.score);
+    expect(exactMeg.score).toBeGreaterThan(mriInstead.score);
+  });
+
+  it('exact matches carry the premium over partial evidence (Parkinson MEG hierarchy)', () => {
+    // Query: "Parkinson disease MEG datasets" → modality + condition requested.
+    const filters = { modality: ['MEG'], condition: ['parkinson'] };
+    const parkinsonMeg = computeMatchScore(
+      makeDataset({ modality: ['MEG'], disease: 'Parkinson disease' }), filters);
+    const parkinsonMri = computeMatchScore(
+      makeDataset({ modality: ['MRI'], disease: 'Parkinson disease' }), filters);
+    const genericParkinson = computeMatchScore(
+      makeDataset({ modality: [], disease: 'Parkinson disease' }), filters);
+    const unrelated = computeMatchScore(
+      makeDataset({ modality: [], disease: null, keywords: ['soil'] }), filters);
+    expect(parkinsonMeg.score).toBeGreaterThan(parkinsonMri.score);   // MEG > MRI
+    expect(parkinsonMri.score).toBeGreaterThan(genericParkinson.score); // MRI > generic Parkinson
+    expect(genericParkinson.score).toBeGreaterThan(unrelated.score);    // Parkinson > unrelated
   });
 
   it('modalityOverlap handles families, direct, and prefix cases', () => {
@@ -138,10 +174,54 @@ describe('computeMatchScore', () => {
     expect(result.matchDetails.condition).toBe(true);
   });
 
+  it('matches region stem-warely (enriched "hippocampal" vs requested "hippocampus")', () => {
+    const result = computeMatchScore(
+      makeDataset({ region: 'hippocampal' }),
+      { region: 'hippocampus' }
+    );
+    expect(result.matchDetails.region).toBe(true);
+    expect(regionOverlap('hippocampus', 'hippocampal')).toBe(true);
+    expect(regionOverlap('motor cortex', 'motor cortex')).toBe(true);
+    expect(regionOverlap('amygdala', 'prefrontal cortex')).toBe(false);
+    expect(regionOverlap('', 'hippocampus')).toBe(false);
+  });
+
+  it('matches condition bidirectionally (enriched label vs parser phrase)', () => {
+    // Parser emits "Parkinson disease"; Stage-3 enrichment stores "parkinson".
+    const result = computeMatchScore(
+      makeDataset({ disease: 'parkinson' }),
+      { condition: ['Parkinson disease'] }
+    );
+    expect(result.matchDetails.condition).toBe(true);
+    expect(result.score).toBeGreaterThan(0.5);
+    // And the reverse direction still works.
+    const reverse = computeMatchScore(
+      makeDataset({ disease: 'Parkinson disease' }),
+      { condition: ['parkinson'] }
+    );
+    expect(reverse.matchDetails.condition).toBe(true);
+  });
+
   it('handles single (non-array) requested values', () => {
     const result = computeMatchScore(makeDataset(), { task: 'resting-state' });
     expect(result.matchCount).toBe(1);
     expect(result.score).toBe(1);
+  });
+
+  it('matches task from the title/description free text, not just keywords', () => {
+    const result = computeMatchScore(
+      makeDataset({ title: 'Working memory capacity in adolescents (fMRI)', keywords: [] }),
+      { task: 'working memory' }
+    );
+    expect(result.matchDetails.task).toBe(true);
+    expect(result.score).toBe(1);
+    // A resting-state dataset must NOT match a working-memory request.
+    const miss = computeMatchScore(
+      makeDataset({ keywords: [] }),
+      { task: 'working memory' }
+    );
+    expect(miss.matchDetails.task).toBe(false);
+    expect(miss.score).toBe(0);
   });
 });
 
@@ -306,5 +386,47 @@ describe('rank', () => {
     rank(mongo, discovery, fullFilters);
     expect(mongo).toHaveLength(1);
     expect(discovery).toHaveLength(1);
+  });
+
+  it('is deterministic — identical inputs produce identical order (Issue 5)', () => {
+    const mongo = [
+      makeDataset({ source_id: 'ds-c', title: 'Charlie' }),
+      makeDataset({ source_id: 'ds-a', title: 'Alpha' }),
+      makeDataset({ source_id: 'ds-b', title: 'Bravo' }),
+    ];
+    const repo = [makeDataset({ source: 'zenodo', source_id: 'z1', title: 'Zulu' })];
+    const first  = rank(mongo, repo, [], {}).map((d) => d.source_id);
+    const second = rank(mongo, repo, [], {}).map((d) => d.source_id);
+    const third  = rank(mongo, repo, [], {}).map((d) => d.source_id);
+    expect(second).toEqual(first);
+    expect(third).toEqual(first);
+  });
+
+  it('breaks score ties by Title ASC then Repository ASC (Issue 5)', () => {
+    const equal = (source, source_id, title) =>
+      makeDataset({ source, source_id, title, quality_score: 0.5, updated_at: daysAgo(50) });
+    // Identical final scores — ordering must come from the tie-breaker chain.
+    const ranked = rank(
+      [
+        equal('openneuro', 'ds-2', 'Zebra'),
+        equal('openneuro', 'ds-1', 'Alpha'),
+        equal('dandi', 'd-1', 'Alpha'),   // same title → Repository ASC
+      ],
+      [],
+      {}
+    );
+    // 'Alpha' × 2 tie on title → Repository ASC: 'dandi' < 'openneuro' → d-1 first.
+    expect(ranked.map((d) => d.source_id)).toEqual(['d-1', 'ds-1', 'ds-2']);
+  });
+
+  it('attaches component scores used by tie-breakers and diagnostics (Issue 6)', () => {
+    const [result] = rank([makeDataset({ source_id: 'ds001' })], [], fullFilters);
+    expect(typeof result._matchScore).toBe('number');
+    expect(typeof result._qualityScore).toBe('number');
+    expect(typeof result._trustScore).toBe('number');
+    expect(typeof result._freshnessScore).toBe('number');
+    expect(typeof result._diversityBonus).toBe('number');
+    expect(result._matchDetails.credits).toBeDefined();
+    expect(result._matchDetails.credits.modality).toBe(1);
   });
 });
