@@ -10,57 +10,49 @@ function buildMongoQuery(filters = {}) {
   const normalizedFilters = filters && typeof filters === 'object' ? filters : {};
   const query = {};
 
-  const toRegexArray = (arr) => {
+  const toRegexList = (arr) => {
     if (!arr) return [];
     const list = Array.isArray(arr) ? arr : [arr];
-    return list.map((item) => new RegExp(`^${item.trim()}$`, 'i'));
+    return list
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .map((item) => new RegExp(item.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
   };
 
-  const modalities = toRegexArray(normalizedFilters.modality);
-  if (modalities.length) query.modality = { $in: modalities };
+  const andConditions = [];
 
-  const species = toRegexArray(normalizedFilters.species);
-  if (species.length) query.species = { $in: species };
+  const addFieldMatch = (items, primaryField) => {
+    const regexes = toRegexList(items);
+    if (!regexes.length) return;
 
-  const diseases = toRegexArray(normalizedFilters.disease || normalizedFilters.condition);
-  if (diseases.length) {
-    query.$or = query.$or || [];
-    query.$or.push({ disease: { $in: diseases } }, { keywords: { $in: diseases } });
+    const orClauses = [];
+    regexes.forEach((rx) => {
+      orClauses.push(
+        { [primaryField]: rx },
+        { keywords: rx },
+        { title: rx },
+        { description: rx }
+      );
+    });
+    andConditions.push({ $or: orClauses });
+  };
+
+  addFieldMatch(normalizedFilters.modality, 'modality');
+  addFieldMatch(normalizedFilters.species, 'species');
+  addFieldMatch(normalizedFilters.disease || normalizedFilters.condition, 'disease');
+  addFieldMatch(normalizedFilters.task, 'keywords');
+  addFieldMatch(normalizedFilters.format, 'keywords');
+  addFieldMatch(normalizedFilters.repository, 'source');
+  addFieldMatch(normalizedFilters.age_group || normalizedFilters.ageGroup, 'age_group');
+  addFieldMatch(normalizedFilters.region, 'region');
+  addFieldMatch(normalizedFilters.availability || normalizedFilters.access_tier, 'access_tier');
+
+  if (normalizedFilters.raw_query && typeof normalizedFilters.raw_query === 'string' && normalizedFilters.raw_query.trim()) {
+    query.$text = { $search: normalizedFilters.raw_query.trim() };
   }
 
-  const tasks = toRegexArray(normalizedFilters.task);
-  if (tasks.length) {
-    query.keywords = query.keywords || {};
-    query.keywords.$in = [...(query.keywords.$in || []), ...tasks];
-  }
-
-  const formats = toRegexArray(normalizedFilters.format);
-  if (formats.length) {
-    query.keywords = query.keywords || {};
-    query.keywords.$in = [...(query.keywords.$in || []), ...formats];
-  }
-
-  const repos = toRegexArray(normalizedFilters.repository);
-  if (repos.length) {
-    query.source = { $in: repos };
-  }
-
-  const ageGroups = toRegexArray(normalizedFilters.age_group || normalizedFilters.ageGroup);
-  if (ageGroups.length) {
-    query.age_group = { $in: ageGroups };
-  }
-
-  const regions = toRegexArray(normalizedFilters.region);
-  if (regions.length) query.region = { $in: regions };
-
-  const availabilities = toRegexArray(normalizedFilters.availability || normalizedFilters.access_tier);
-  if (availabilities.length) {
-    query.access_tier = { $in: availabilities };
-  }
-
-  // Use $text index for raw_query if no structured fields match
-  if (Object.keys(query).length === 0 && normalizedFilters.raw_query) {
-    query.$text = { $search: normalizedFilters.raw_query };
+  if (andConditions.length > 0) {
+    query.$and = andConditions;
   }
 
   return query;
@@ -116,31 +108,43 @@ async function searchDatasets(filters, limit = 30) {
   const textSort = { score: { $meta: 'textScore' } };
 
   if (hasText) {
-    return Dataset.find(mongoQuery, textProjection).sort(textSort).limit(limit).lean();
+    try {
+      const results = await Dataset.find(mongoQuery, textProjection).sort(textSort).limit(limit).lean();
+      if (results.length > 0) return results;
+
+      // Fallback: if $text + $and filters returned 0 results, try without $text (filters only)
+      const { $text, ...onlyFilters } = mongoQuery;
+      if (Object.keys(onlyFilters).length > 0) {
+        const filterOnly = await Dataset.find(onlyFilters).limit(limit).lean();
+        if (filterOnly.length > 0) return filterOnly;
+      }
+    } catch { /* proceed to fallbacks below */ }
   }
 
   // Structured AND-query first (fast — uses field indexes).
-  const structured = await Dataset.find(mongoQuery).limit(limit).lean();
-  if (structured.length > 0) return structured;
+  try {
+    const structured = await Dataset.find(mongoQuery).limit(limit).lean();
+    if (structured.length > 0) return structured;
+  } catch { /* proceed */ }
 
-  // ponytail: two-phase fallback — structured AND-query can miss stored datasets
-  // when agent only populated *some* filter fields (e.g. species:[] stored but
-  // query requires species:["human"]). A $text search on NORMALIZED SEMANTIC
-  // terms (Phase 6) finds them — never on the raw typo-ridden query string.
   const semanticText = buildSemanticTextQuery(filters);
   if (semanticText) {
-    return Dataset.find(
-      { $text: { $search: semanticText } },
-      textProjection,
-    ).sort(textSort).limit(limit).lean();
+    try {
+      const semanticResults = await Dataset.find(
+        { $text: { $search: semanticText } },
+        textProjection
+      ).sort(textSort).limit(limit).lean();
+      if (semanticResults.length > 0) return semanticResults;
+    } catch { /* proceed */ }
   }
 
-  // Last resort: raw query text only when nothing structured is available.
   if (filters.raw_query) {
-    return Dataset.find(
-      { $text: { $search: filters.raw_query } },
-      textProjection,
-    ).sort(textSort).limit(limit).lean();
+    try {
+      return await Dataset.find(
+        { $text: { $search: filters.raw_query } },
+        textProjection
+      ).sort(textSort).limit(limit).lean();
+    } catch { /* proceed */ }
   }
 
   return [];
