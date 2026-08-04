@@ -292,12 +292,12 @@ describe('rank', () => {
     expect(result._matchDetails.matchRatio).toBeGreaterThan(0);
   });
 
-  it('limits the result set to the top 20', () => {
-    const many = Array.from({ length: 30 }, (_, i) =>
+  it('limits the result set to the top 30', () => {
+    const many = Array.from({ length: 40 }, (_, i) =>
       makeDataset({ source_id: `ds-${i}`, title: `Dataset ${i}` })
     );
     const ranked = rank(many, [], {});
-    expect(ranked).toHaveLength(20);
+    expect(ranked).toHaveLength(30);
   });
 
   it('does not mutate the input arrays', () => {

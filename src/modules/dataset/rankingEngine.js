@@ -3,7 +3,7 @@
  *
  * Pure computation — no I/O, no network calls, no database queries.
  * Merges MongoDB and discovery datasets, removes duplicates,
- * computes a weighted ranking score, and returns the top 20.
+ * computes a weighted ranking score, and returns the top 30.
  *
  * Architecture ref: §9 "Layer 3 Ranking Engine Design"
  *
@@ -252,7 +252,7 @@ function deduplicate(mongodbResults, repositoryResults, discoveryResults) {
 // ---------- Final ranking (§9.6 / §4.5) ----------
 
 /**
- * Merge, deduplicate, score, sort, and return top 20 results.
+ * Merge, deduplicate, score, sort, and return top 30 results.
  *
  * §4.5: rank now accepts THREE pools (Mongo first, then repository, then web).
  * Weights/formula unchanged from §9.3.
@@ -313,9 +313,9 @@ function rank(mongodbResults, repositoryResults, discoveryResults, filters) {
     };
   });
 
-  // Sort descending by score, return top 20
+  // Sort descending by score, return top 30
   scored.sort((a, b) => b._rankingScore - a._rankingScore);
-  return scored.slice(0, 20);
+  return scored.slice(0, 30);
 }
 
 module.exports = {

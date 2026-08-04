@@ -109,7 +109,7 @@ function buildSemanticTextQuery(filters = {}) {
   return terms.join(' ');
 }
 
-async function searchDatasets(filters, limit = 20) {
+async function searchDatasets(filters, limit = 30) {
   const mongoQuery = buildMongoQuery(filters);
   const hasText = Boolean(mongoQuery.$text);
   const textProjection = { score: { $meta: 'textScore' } };
