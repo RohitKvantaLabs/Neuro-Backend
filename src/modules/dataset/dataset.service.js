@@ -66,6 +66,49 @@ function buildMongoQuery(filters = {}) {
   return query;
 }
 
+/**
+ * Build a $text search string from NORMALIZED semantic terms.
+ *
+ * Stabilization (Phase 6): the fallback must reflect semantic relevance, not
+ * raw token coincidence. Searching the raw query string means typo-preserved
+ * tokens ("fMRRri", "stte") drive the $text match — results missing critical
+ * requested fields then dominate. Instead, structured filter fields are
+ * prioritized (modality → task → condition → region → species → age_group),
+ * and only non-typo keywords are appended (same typo signal as the Python
+ * build_query_terms: 3+ identical consecutive letters).
+ */
+function buildSemanticTextQuery(filters = {}) {
+  const terms = [];
+  const push = (v) => {
+    const s = String(v || '').trim();
+    if (s) terms.push(s);
+  };
+
+  if (Array.isArray(filters.modality)) filters.modality.forEach(push);
+  if (filters.task) push(filters.task);
+  if (Array.isArray(filters.condition)) filters.condition.forEach(push);
+  if (filters.region) push(filters.region);
+  if (Array.isArray(filters.species)) filters.species.forEach(push);
+  if (filters.age_range || filters.age_group) push(filters.age_range || filters.age_group);
+
+  // Keywords only as filler — and only when they are not typo fragments or
+  // duplicates of an already-included structured value.
+  const included = new Set(terms.map((t) => t.toLowerCase()));
+  if (Array.isArray(filters.keywords)) {
+    for (const kw of filters.keywords) {
+      const k = String(kw || '').trim();
+      if (!k) continue;
+      const kl = k.toLowerCase();
+      if (included.has(kl)) continue;
+      if (/(.)\1{2,}/.test(kl)) continue; // typo signal: 3+ same letters in a row
+      terms.push(k);
+      included.add(kl);
+    }
+  }
+
+  return terms.join(' ');
+}
+
 async function searchDatasets(filters, limit = 20) {
   const mongoQuery = buildMongoQuery(filters);
   const hasText = Boolean(mongoQuery.$text);
@@ -82,7 +125,17 @@ async function searchDatasets(filters, limit = 20) {
 
   // ponytail: two-phase fallback — structured AND-query can miss stored datasets
   // when agent only populated *some* filter fields (e.g. species:[] stored but
-  // query requires species:["human"]). A $text search on raw_query finds them.
+  // query requires species:["human"]). A $text search on NORMALIZED SEMANTIC
+  // terms (Phase 6) finds them — never on the raw typo-ridden query string.
+  const semanticText = buildSemanticTextQuery(filters);
+  if (semanticText) {
+    return Dataset.find(
+      { $text: { $search: semanticText } },
+      textProjection,
+    ).sort(textSort).limit(limit).lean();
+  }
+
+  // Last resort: raw query text only when nothing structured is available.
   if (filters.raw_query) {
     return Dataset.find(
       { $text: { $search: filters.raw_query } },

@@ -7,19 +7,69 @@
  *
  * Architecture ref: §9 "Layer 3 Ranking Engine Design"
  *
- * Formula (§9.3):
- *   final_score = matchScore*0.50 + qualityScore*0.20 +
- *                 freshnessScore*0.15 + trustScore*0.10 + diversityBonus*0.05
+ * Formula (§9.3) — rebalanced 2026-08-04 (stabilization Phase 5):
+ *
+ *   BEFORE (favored shallow keyword matches):
+ *     final_score = matchScore*0.50 + qualityScore*0.20 +
+ *                   freshnessScore*0.15 + trustScore*0.10 + diversityBonus*0.05
+ *
+ *   AFTER (repository authority + dataset quality + semantic relevance first):
+ *     final_score = matchScore*0.30 + qualityScore*0.25 +
+ *                   trustScore*0.20 + freshnessScore*0.15 + diversityBonus*0.10
+ *
+ * Rationale: match (free-text/token coincidence) no longer dominates — a
+ * verified repository dataset with rich metadata outranks a shallow
+ * keyword-coincidence MongoDB record. Semantic relevance stays the largest
+ * single component, but metadata completeness (quality), repository
+ * authority (trust), and diversity now carry meaningful weight.
  */
 
 const env = require('../../config/env.config');
 
+/**
+ * Modality synonym families (mirrors Neuro-Agents app/connectors/base.py
+ * MODALITY_SYNONYMS — stabilization Phase 6). Repository-native values are
+ * coarse (OpenNeuro stores ``mri`` for all MRI scans; DANDI
+ * ``Electrophysiology``) while the Query Parser emits precise terms (``fMRI``,
+ * ``sMRI``). A requested modality matches when it shares a synonym family with
+ * a declared value, so relevance is semantic rather than exact-token.
+ */
+const MODALITY_SYNONYMS = {
+  fmri: new Set(['fmri', 'mri', 'functional mri', 'functional magnetic resonance imaging']),
+  smri: new Set(['smri', 'mri', 'structural mri', 'structural magnetic resonance imaging']),
+  mri:  new Set(['mri', 'fmri', 'smri', 'functional mri', 'structural mri']),
+  eeg:  new Set(['eeg', 'electroencephalography']),
+  meg:  new Set(['meg', 'magnetoencephalography']),
+  ieeg: new Set(['ieeg', 'intracranial eeg', 'ecog']),
+  ecog: new Set(['ecog', 'ieeg', 'intracranial eeg']),
+  pet:  new Set(['pet', 'positron emission tomography']),
+  dti:  new Set(['dti', 'diffusion mri', 'diffusion tensor imaging', 'mri']),
+  nirs: new Set(['nirs', 'fnirs', 'functional near-infrared spectroscopy']),
+  fnirs: new Set(['fnirs', 'nirs']),
+};
+
+function modalityOverlap(requested, declared) {
+  const r = String(requested || '').trim().toLowerCase();
+  const d = String(declared || '').trim().toLowerCase();
+  if (!r || !d) return false;
+  if (r === d) return true;
+  const famR = MODALITY_SYNONYMS[r];
+  const famD = MODALITY_SYNONYMS[d];
+  if (famR && famD) {
+    for (const v of famR) if (famD.has(v)) return true;
+    return false;
+  }
+  if (famR) return famR.has(d);
+  if (famD) return famD.has(r);
+  return r.includes(d) || d.includes(r); // fuzzy fallback ("mri" vs "functional mri")
+}
+
 const DEFAULT_WEIGHTS = {
-  match:     0.50,
-  quality:   0.20,
+  match:     0.30,
+  quality:   0.25,
+  trust:     0.20,
   freshness: 0.15,
-  trust:     0.10,
-  diversity: 0.05,
+  diversity: 0.10,
 };
 
 function getWeights() {
@@ -53,7 +103,8 @@ function computeMatchScore(dataset, filters) {
     let matched = false;
 
     if (field === 'modality') {
-      matched = values.some((v) => (dataset.modality || []).some((m) => m.toLowerCase() === v.toLowerCase()));
+      matched = values.some((v) =>
+        (dataset.modality || []).some((m) => modalityOverlap(v, m)));
     } else if (field === 'species') {
       matched = values.some((v) => (dataset.species || []).some((s) => s.toLowerCase() === v.toLowerCase()));
     } else if (field === 'condition') {
@@ -141,12 +192,16 @@ function computeTrustScore(dataset) {
 
 /**
  * DiversityBonus (§9.4.5) — boost underrepresented sources.
+ *
+ * Rebalanced 2026-08-04 (Phase 5): values scaled up to be effective under the
+ * new diversityWeight of 0.10 (the old max 0.05 × 0.05 weight contributed at
+ * most 0.0025 — a rounding error).
  */
 function computeDiversityBonus(dataset, sourceCounts) {
   const source = dataset.source || 'unknown';
   const count  = sourceCounts[source] || 0;
-  if (count <= 1) return 0.05;
-  if (count <= 3) return 0.02;
+  if (count <= 1) return 0.50;
+  if (count <= 3) return 0.20;
   return 0.0;
 }
 
@@ -263,4 +318,12 @@ function rank(mongodbResults, repositoryResults, discoveryResults, filters) {
   return scored.slice(0, 20);
 }
 
-module.exports = { rank, deduplicate, computeMatchScore, computeQualityScore, computeFreshnessScore, computeTrustScore };
+module.exports = {
+  rank,
+  deduplicate,
+  computeMatchScore,
+  computeQualityScore,
+  computeFreshnessScore,
+  computeTrustScore,
+  modalityOverlap,
+};

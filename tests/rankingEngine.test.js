@@ -9,11 +9,11 @@
 jest.mock('../src/config/env.config', () => ({
   discoveryPolicy: {},
   rankingEngine: {
-    matchWeight: 0.5,
-    qualityWeight: 0.2,
+    matchWeight: 0.3,
+    qualityWeight: 0.25,
     freshnessWeight: 0.15,
-    trustWeight: 0.1,
-    diversityWeight: 0.05,
+    trustWeight: 0.2,
+    diversityWeight: 0.1,
   },
   featureFlags: {},
 }));
@@ -25,6 +25,7 @@ const {
   computeQualityScore,
   computeFreshnessScore,
   computeTrustScore,
+  modalityOverlap,
 } = require('../src/modules/dataset/rankingEngine');
 
 // ---- Fixtures ------------------------------------------------------------
@@ -96,6 +97,33 @@ describe('computeMatchScore', () => {
       { modality: ['fMRI'], species: ['human'] }
     );
     expect(result.score).toBe(1);
+  });
+
+  it('matches modality via synonym families (Phase 6 — "fmri" vs stored "mri")', () => {
+    // OpenNeuro/DANDI store coarse values; the query parser emits precise ones.
+    const result = computeMatchScore(
+      makeDataset({ modality: ['mri'] }),
+      { modality: ['fMRI'] }
+    );
+    expect(result.matchDetails.modality).toBe(true);
+    expect(result.score).toBe(1);
+  });
+
+  it('does not match modalities outside the synonym family', () => {
+    const result = computeMatchScore(
+      makeDataset({ modality: ['eeg'] }),
+      { modality: ['fMRI'] }
+    );
+    expect(result.matchDetails.modality).toBe(false);
+    expect(result.score).toBe(0);
+  });
+
+  it('modalityOverlap handles families, direct, and prefix cases', () => {
+    expect(modalityOverlap('fMRI', 'mri')).toBe(true);       // synonym family
+    expect(modalityOverlap('fmri', 'FMRI')).toBe(true);      // case-insensitive direct
+    expect(modalityOverlap('eeg', 'mri')).toBe(false);       // no family link
+    expect(modalityOverlap('mri', 'functional mri')).toBe(true); // family membership (mri family)
+    expect(modalityOverlap('', 'mri')).toBe(false);          // empty guard
   });
 
   it('matches keywords against title and description', () => {
