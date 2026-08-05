@@ -77,6 +77,10 @@ const search = asyncHandler(async (req, res) => {
         source:  orchestratorResult.source,
         results: orchestratorResult.results,
         metrics: orchestratorResult.metrics,
+        // v0.3 §9.2 (additive): expose the effective (merged) parsed filters so
+        // the UI can auto-select parser-derived filters (FR-8) and detect
+        // filter/query conflicts (FR-7). Search behavior is unchanged.
+        filters: orchestratorResult.filters,
       },
       orchestratorResult.results.length > 0
         ? 'Results found.'
@@ -108,7 +112,8 @@ const search = asyncHandler(async (req, res) => {
       resultSource: 'cache',
       resultCount: cachedResults.length,
     });
-    return new ApiResponse(200, { source: 'cache', results: cachedResults }, 'Results found.').send(res);
+    // v0.3 §9.2 (additive): expose effective filters (FR-8/FR-7).
+    return new ApiResponse(200, { source: 'cache', results: cachedResults, filters }, 'Results found.').send(res);
   }
 
   // Cache miss: return Python's verified records directly.
@@ -136,7 +141,8 @@ const search = asyncHandler(async (req, res) => {
 
   return new ApiResponse(
     200,
-    { source: 'agent', results: fallbackDatasets },
+    // v0.3 §9.2 (additive): expose effective filters (FR-8/FR-7).
+    { source: 'agent', results: fallbackDatasets, filters },
     fallbackDatasets.length > 0 ? 'Results found via live search.' : 'No datasets found for this query.'
   ).send(res);
 });
