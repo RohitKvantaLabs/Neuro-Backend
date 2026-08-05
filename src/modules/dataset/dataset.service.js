@@ -10,43 +10,38 @@ function buildMongoQuery(filters = {}) {
   const normalizedFilters = filters && typeof filters === 'object' ? filters : {};
   const query = {};
 
-  // Metadata filters are exact constraints, not keyword searches. Anchoring
-  // keeps MRI distinct from fMRI while allowing harmless display variants.
-  const toExactRegexList = (arr) => {
+  const toRegexList = (arr) => {
     if (!arr) return [];
     const list = Array.isArray(arr) ? arr : [arr];
     return list
       .map((item) => String(item || '').trim())
       .filter(Boolean)
-      .map((item) => {
-        const escaped = item.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const normalizedPattern = escaped
-          .replace(/[\u2018\u2019']/g, "['\u2018\u2019]?")
-          .replace(/[\s_-]+/g, '[\\s_-]+');
-        return new RegExp(`^${normalizedPattern}$`, 'i');
-      });
+      .map((item) => new RegExp(item.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
   };
 
   const andConditions = [];
 
-  const addFieldMatch = (items, field) => {
-    const regexes = toExactRegexList(items);
+  const addFieldMatch = (items, primaryField) => {
+    const regexes = toRegexList(items);
     if (!regexes.length) return;
-    // $in works for both scalar fields and arrays such as modality/species.
-    const fields = Array.isArray(field) ? field : [field];
-    const exactMatch = { $in: regexes };
-    andConditions.push(fields.length === 1
-      ? { [fields[0]]: exactMatch }
-      : { $or: fields.map((name) => ({ [name]: exactMatch })) });
+
+    const orClauses = [];
+    regexes.forEach((rx) => {
+      orClauses.push(
+        { [primaryField]: rx },
+        { keywords: rx },
+        { title: rx },
+        { description: rx }
+      );
+    });
+    andConditions.push({ $or: orClauses });
   };
 
   addFieldMatch(normalizedFilters.modality, 'modality');
   addFieldMatch(normalizedFilters.species, 'species');
   addFieldMatch(normalizedFilters.disease || normalizedFilters.condition, 'disease');
-  // Legacy records store task/format taxonomy in keywords; newer records may
-  // use dedicated fields. Both are metadata fields and both match exactly.
-  addFieldMatch(normalizedFilters.task, ['task', 'keywords']);
-  addFieldMatch(normalizedFilters.format, ['format', 'keywords']);
+  addFieldMatch(normalizedFilters.task, 'keywords');
+  addFieldMatch(normalizedFilters.format, 'keywords');
   addFieldMatch(normalizedFilters.repository, 'source');
   addFieldMatch(normalizedFilters.age_group || normalizedFilters.ageGroup, 'age_group');
   addFieldMatch(normalizedFilters.region, 'region');
@@ -61,46 +56,6 @@ function buildMongoQuery(filters = {}) {
   }
 
   return query;
-}
-
-function normalizeMetadataValue(value) {
-  return String(value || '')
-    .trim()
-    .toLocaleLowerCase()
-    .replace(/[\u2018\u2019']/g, '')
-    .replace(/[\s_-]+/g, ' ');
-}
-
-function metadataValues(value) {
-  return Array.isArray(value) ? value : (value ? [value] : []);
-}
-
-// Discovery providers return plain objects, so enforce the same metadata-only
-// constraints before their results are returned to the client.
-function filterDatasetsByMetadata(datasets, filters = {}) {
-  if (!Array.isArray(datasets)) return [];
-  const groups = [
-    ['modality', ['modality']],
-    ['species', ['species']],
-    ['disease', ['disease', 'condition']],
-    ['age_group', ['age_group', 'ageGroup']],
-    ['task', ['task', 'keywords']],
-    ['format', ['format', 'keywords']],
-    ['repository', ['source']],
-    ['availability', ['access_tier', 'availability']],
-  ];
-  const activeGroups = groups.map(([filterName, fields]) => ({
-    fields,
-    selected: metadataValues(filters[filterName] || (filterName === 'disease' ? filters.condition : undefined))
-      .map(normalizeMetadataValue)
-      .filter(Boolean),
-  })).filter((group) => group.selected.length > 0);
-
-  if (!activeGroups.length) return datasets;
-  return datasets.filter((dataset) => activeGroups.every(({ fields, selected }) => {
-    const actual = fields.flatMap((field) => metadataValues(dataset[field])).map(normalizeMetadataValue);
-    return selected.some((value) => actual.includes(value));
-  }));
 }
 
 /**
@@ -157,8 +112,12 @@ async function searchDatasets(filters, limit = 30) {
       const results = await Dataset.find(mongoQuery, textProjection).sort(textSort).limit(limit).lean();
       if (results.length > 0) return results;
 
-      // Do not loosen either the text query or active metadata filters. A
-      // search with filters must satisfy both, otherwise return no results.
+      // Fallback: if $text + $and filters returned 0 results, try without $text (filters only)
+      const { $text, ...onlyFilters } = mongoQuery;
+      if (Object.keys(onlyFilters).length > 0) {
+        const filterOnly = await Dataset.find(onlyFilters).limit(limit).lean();
+        if (filterOnly.length > 0) return filterOnly;
+      }
     } catch { /* proceed to fallbacks below */ }
   }
 
@@ -167,11 +126,6 @@ async function searchDatasets(filters, limit = 30) {
     const structured = await Dataset.find(mongoQuery).limit(limit).lean();
     if (structured.length > 0) return structured;
   } catch { /* proceed */ }
-
-  // Semantic/raw fallbacks are search-only behaviour. Applying either one
-  // without structured clauses would leak datasets that violate a filter.
-  const hasActiveFilters = Array.isArray(mongoQuery.$and) && mongoQuery.$and.length > 0;
-  if (hasActiveFilters) return [];
 
   const semanticText = buildSemanticTextQuery(filters);
   if (semanticText) {
@@ -199,4 +153,4 @@ async function searchDatasets(filters, limit = 30) {
 // ponytail: alias for RetrievalOrchestrator (architecture §18.2) — same function, separate export name.
 const searchMongoDB = searchDatasets;
 
-module.exports = { buildMongoQuery, filterDatasetsByMetadata, searchDatasets, searchMongoDB };
+module.exports = { buildMongoQuery, searchDatasets, searchMongoDB };

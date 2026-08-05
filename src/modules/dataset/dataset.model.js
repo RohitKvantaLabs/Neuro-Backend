@@ -19,10 +19,6 @@ const datasetSchema = new mongoose.Schema(
     species: { type: [String], default: [] },
     subject_count: { type: Number, default: null },
     keywords: { type: [String], default: [] },
-    // Optional normalized taxonomy fields. Legacy records keep task/format
-    // values in keywords, which remains supported by the query layer.
-    task: { type: [String], default: [] },
-    format: { type: [String], default: [] },
 
     license: { type: String, default: null },
 
