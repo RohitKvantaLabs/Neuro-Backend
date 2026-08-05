@@ -4,7 +4,7 @@ const asyncHandler = require('../../utils/asyncHandler');
 const logger = require('../../utils/logger');
 const env = require('../../config/env.config');
 const { parseQuery, runFallbackSearch } = require('../agent/agent.client');
-const { searchDatasets } = require('./dataset.service');
+const { searchDatasets, filterDatasetsByMetadata } = require('./dataset.service');
 const { orchestrateSearch } = require('./retrievalOrchestrator');
 const Dataset = require('./dataset.model');
 const { User } = require('../user/user.model');
@@ -86,16 +86,21 @@ const search = asyncHandler(async (req, res) => {
 
   // ── Legacy path (unchanged) ───────────────────────────────────────────────
   let filters;
-  try {
-    filters = await parseQuery(effectiveQuery || 'neuroscience datasets', req.user?.id, userEmail);
-  } catch (err) {
-    logger.warn(`Dataset search parser fallback triggered for query="${effectiveQuery}": ${err.message}`);
-    filters = { raw_query: effectiveQuery };
+  if (!effectiveQuery && hasExplicitFilters) {
+    // Filter-only searches must not acquire a synthetic text query.
+    filters = { ...explicitFilters, raw_query: '' };
+  } else {
+    try {
+      filters = await parseQuery(effectiveQuery, req.user?.id, userEmail);
+    } catch (err) {
+      logger.warn(`Dataset search parser fallback triggered for query="${effectiveQuery}": ${err.message}`);
+      filters = { raw_query: effectiveQuery };
+    }
   }
 
   // Merge user explicit filters over parser filters
   if (hasExplicitFilters) {
-    filters = { ...filters, ...explicitFilters, raw_query: effectiveQuery || filters.raw_query };
+    filters = { ...filters, ...explicitFilters, raw_query: effectiveQuery };
   }
 
   const cachedResults = await searchDatasets(filters);
@@ -120,7 +125,10 @@ const search = asyncHandler(async (req, res) => {
       userId: req.user?.id,
       userEmail,
     });
-    fallbackDatasets = Array.isArray(agentResult?.datasets) ? agentResult.datasets : [];
+    fallbackDatasets = filterDatasetsByMetadata(
+      Array.isArray(agentResult?.datasets) ? agentResult.datasets : [],
+      filters
+    );
   } catch (err) {
     logger.error(`Fallback agent search failed for query="${query}": ${err.message}`);
     throw new ApiError(502, 'Dataset fallback search could not be completed. Please try again.');

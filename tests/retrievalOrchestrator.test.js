@@ -20,6 +20,7 @@ jest.mock('../src/modules/agent/agent.client', () => ({
 
 jest.mock('../src/modules/dataset/dataset.service', () => ({
   searchMongoDB: jest.fn(),
+  filterDatasetsByMetadata: jest.fn((datasets) => datasets),
 }));
 
 // Pin the orchestrator on; repository layer + web discovery on by default.

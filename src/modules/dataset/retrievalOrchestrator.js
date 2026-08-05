@@ -23,7 +23,7 @@
 const logger                                      = require('../../utils/logger');
 const env                                         = require('../../config/env.config');
 const { parseQuery, runFallbackSearch, runRepositorySearch } = require('../agent/agent.client');
-const { searchMongoDB }                           = require('./dataset.service');
+const { searchMongoDB, filterDatasetsByMetadata } = require('./dataset.service');
 const { analyzeQueryComplexity }                  = require('./queryComplexityAnalyzer');
 const { computeRetrievalQuality, evaluate, evaluateAfterRepositories } = require('./discoveryPolicy');
 const { rank }                                    = require('./rankingEngine');
@@ -66,8 +66,14 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
   // ──────────────────────────────────────────────
   // Step 1: Parse Query
   // ──────────────────────────────────────────────
+  const hasExplicitFilters = explicitFilters && typeof explicitFilters === 'object' && Object.values(explicitFilters).some(
+    (v) => (Array.isArray(v) ? v.length > 0 : Boolean(v))
+  );
   let filters;
-  try {
+  if (!query && hasExplicitFilters) {
+    // Do not manufacture a text query for a filter-only request.
+    filters = { ...explicitFilters, raw_query: '' };
+  } else try {
     filters = await parseQuery(query, userId, userEmail);
   } catch (err) {
     logger.warn(`[Orchestrator] parseQuery failed: ${err.message} — using raw fallback`);
@@ -76,11 +82,8 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
 
   // Merge explicit UI filters over parser result
   if (explicitFilters && typeof explicitFilters === 'object') {
-    const hasExplicit = Object.values(explicitFilters).some(
-      (v) => (Array.isArray(v) ? v.length > 0 : Boolean(v))
-    );
-    if (hasExplicit) {
-      filters = { ...filters, ...explicitFilters, raw_query: query || filters.raw_query };
+    if (hasExplicitFilters) {
+      filters = { ...filters, ...explicitFilters, raw_query: query };
     }
   }
 
@@ -139,7 +142,10 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
     if (env.featureFlags?.useRepositoryLayer && typeof runRepositorySearch === 'function') {
       try {
         const repoRes = await runRepositorySearch({ query, filters, userId, userEmail });
-        repositoryResults = Array.isArray(repoRes?.datasets) ? repoRes.datasets : [];
+        repositoryResults = filterDatasetsByMetadata(
+          Array.isArray(repoRes?.datasets) ? repoRes.datasets : [],
+          filters
+        );
         logger.info(`[Orchestrator] Repository tier complete — ${repositoryResults.length} datasets`);
       } catch (err) {
         // §7.5: repo failure → degrade to web tier

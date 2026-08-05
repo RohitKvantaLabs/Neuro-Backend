@@ -22,6 +22,7 @@ jest.mock('../src/modules/agent/agent.client', () => ({
 
 jest.mock('../src/modules/dataset/dataset.service', () => ({
   searchDatasets: jest.fn(),
+  filterDatasetsByMetadata: jest.fn((datasets) => datasets),
 }));
 
 jest.mock('../src/modules/queryLog/queryLog.model', () => ({
