@@ -330,11 +330,47 @@ const resyncRepository = asyncHandler(async (req, res) => {
 
 // ─── Analytics (§11.5) ────────────────────────────────────────────────────────
 
+// Percentile helper (nearest-rank). Used on REAL persisted durations from the
+// AgentLog collection — never on estimated values.
+function _percentile(sortedValues, p) {
+  if (!Array.isArray(sortedValues) || sortedValues.length === 0) return null;
+  const idx = (sortedValues.length - 1) * (p / 100);
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return Math.round(sortedValues[lo] * 10) / 10;
+  const value = sortedValues[lo] + (sortedValues[hi] - sortedValues[lo]) * (idx - lo);
+  return Math.round(value * 10) / 10;
+}
+
+// Display label for a Dataset.source key when no Repository document matches.
+function _humanizeSource(source) {
+  const s = String(source || '').trim();
+  if (!s) return 'Unknown';
+  if (s === 'web_search') return 'Web Discovery';
+  return s
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .split(' ')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
 const getAnalytics = asyncHandler(async (req, res) => {
   const since = new Date();
   since.setDate(since.getDate() - 60);
 
-  const [series, users, saved, collections, cacheCount, fallbackCount, mergedCount] = await Promise.all([
+  // Agent operations that make up a live search pipeline. durationMs for these
+  // is REAL persisted timing collected by agent.client.js.
+  const AgentLog = require('./agentLog.model');
+  const SEARCH_AGENTS = ['parse_query', 'repository_search', 'fallback'];
+
+  const [
+    series, users, saved, collections, cacheCount, fallbackCount, mergedCount,
+    repoCounts, repoFilterSearches, repoDocs,
+    perfByDay, perfByAgent,
+    outcomeStats, topQuery, topEmptyQuery,
+    agentErrorCount, topErrorReason, topFailedQuery,
+  ] = await Promise.all([
     QueryLog.aggregate([
       { $match: { createdAt: { $gte: since } } },
       {
@@ -355,12 +391,251 @@ const getAnalytics = asyncHandler(async (req, res) => {
     // New orchestrator results (§4.7) log as 'merged' — counted so the
     // cache-hit KPI denominator includes them (they are not cache hits).
     QueryLog.countDocuments({ resultSource: 'merged' }),
+
+    // ── Widget 2: real datasets indexed per repository source ────────────────
+    Dataset.aggregate([
+      { $group: { _id: '$source', datasetsIndexed: { $sum: 1 } } },
+      { $sort: { datasetsIndexed: -1 } },
+      { $project: { _id: 0, source: '$_id', datasetsIndexed: 1 } },
+    ]),
+    // Real searches whose filters targeted a specific repository
+    // (filters.repository is written by the UI / orchestrator).
+    QueryLog.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: since },
+          $or: [
+            { 'filters.repository': { $type: 'array', $ne: [] } },
+            { 'filters.repository': { $type: 'string', $ne: '' } },
+          ],
+        },
+      },
+      {
+        $addFields: {
+          repoList: {
+            $cond: [{ $isArray: '$filters.repository' }, '$filters.repository', ['$filters.repository']],
+          },
+        },
+      },
+      { $unwind: '$repoList' },
+      { $match: { repoList: { $type: 'string' } } },
+      {
+        $group: {
+          _id: { $toLower: { $trim: { input: '$repoList' } } },
+          searchesServed: { $sum: 1 },
+        },
+      },
+      { $project: { _id: 0, source: '$_id', searchesServed: 1 } },
+    ]),
+    // Real repository metadata (status, last sync, admin-tracked count).
+    Repository.find().sort({ createdAt: -1 }).lean(),
+
+    // ── Widget 3: real per-day search-performance timings (AgentLog) ─────────
+    AgentLog.aggregate([
+      { $match: { agent: { $in: SEARCH_AGENTS }, createdAt: { $gte: since } } },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          count: { $sum: 1 },
+          avgMs: { $avg: '$durationMs' },
+          minMs: { $min: '$durationMs' },
+          maxMs: { $max: '$durationMs' },
+          durations: { $push: '$durationMs' },
+        },
+      },
+      { $sort: { _id: 1 } },
+      { $project: { _id: 0, day: '$_id', count: 1, avgMs: 1, minMs: 1, maxMs: 1, durations: 1 } },
+    ]),
+    // Stage breakdown — only stages that are actually persisted.
+    AgentLog.aggregate([
+      { $match: { agent: { $in: SEARCH_AGENTS }, createdAt: { $gte: since } } },
+      {
+        $group: {
+          _id: '$agent',
+          count: { $sum: 1 },
+          avgMs: { $avg: '$durationMs' },
+          errors: { $sum: { $cond: [{ $eq: ['$status', 'error'] }, 1, 0] } },
+        },
+      },
+    ]),
+
+    // ── Widget 4: real search outcomes (QueryLog) ────────────────────────────
+    QueryLog.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: 1 },
+          withResults: { $sum: { $cond: [{ $gt: ['$resultCount', 0] }, 1, 0] } },
+          noResults: { $sum: { $cond: [{ $eq: ['$resultCount', 0] }, 1, 0] } },
+          avgResultsPerSearch: { $avg: '$resultCount' },
+          cache: { $sum: { $cond: [{ $eq: ['$resultSource', 'cache'] }, 1, 0] } },
+          merged: { $sum: { $cond: [{ $eq: ['$resultSource', 'merged'] }, 1, 0] } },
+          fallback: { $sum: { $cond: [{ $eq: ['$resultSource', 'fallback'] }, 1, 0] } },
+        },
+      },
+      { $project: { _id: 0 } },
+    ]),
+    QueryLog.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: since },
+          resultCount: { $gt: 0 },
+          rawQuery: { $nin: ['', null] },
+        },
+      },
+      { $group: { _id: '$rawQuery', count: { $sum: 1 } } },
+      { $sort: { count: -1, _id: 1 } },
+      { $limit: 1 },
+      { $project: { _id: 0, query: '$_id', count: 1 } },
+    ]),
+    QueryLog.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: since },
+          resultCount: 0,
+          rawQuery: { $nin: ['', null] },
+        },
+      },
+      { $group: { _id: '$rawQuery', count: { $sum: 1 } } },
+      { $sort: { count: -1, _id: 1 } },
+      { $limit: 1 },
+      { $project: { _id: 0, query: '$_id', count: 1 } },
+    ]),
+    // Real search-operation failures (AgentLog status='error', search agents only).
+    AgentLog.countDocuments({
+      agent: { $in: SEARCH_AGENTS },
+      status: 'error',
+      createdAt: { $gte: since },
+    }),
+    AgentLog.aggregate([
+      {
+        $match: {
+          agent: { $in: SEARCH_AGENTS },
+          status: 'error',
+          errorMessage: { $nin: [null, ''] },
+          createdAt: { $gte: since },
+        },
+      },
+      { $group: { _id: '$errorMessage', count: { $sum: 1 } } },
+      { $sort: { count: -1, _id: 1 } },
+      { $limit: 1 },
+      { $project: { _id: 0, reason: '$_id', count: 1 } },
+    ]),
+    AgentLog.aggregate([
+      {
+        $match: {
+          agent: { $in: SEARCH_AGENTS },
+          status: 'error',
+          query: { $nin: ['', null] },
+          createdAt: { $gte: since },
+        },
+      },
+      { $group: { _id: '$query', count: { $sum: 1 } } },
+      { $sort: { count: -1, _id: 1 } },
+      { $limit: 1 },
+      { $project: { _id: 0, query: '$_id', count: 1 } },
+    ]),
   ]);
 
   const total = cacheCount + fallbackCount + mergedCount;
   const cacheHitRate = total > 0 ? cacheCount / total : 0;
 
-  return new ApiResponse(200, { series, users, saved, collections, cacheHitRate, mergedCount }).send(res);
+  // ── Widget 2: merge real dataset counts, search usage, and repo metadata ───
+  const repoCountMap = new Map(repoCounts.map((r) => [r.source, r.datasetsIndexed]));
+  const searchMap = new Map(repoFilterSearches.map((r) => [r.source, r.searchesServed]));
+  const sourceToRepo = new Map();
+  for (const r of repoDocs) {
+    const key = r.endpoint_config && typeof r.endpoint_config.source === 'string' && r.endpoint_config.source.trim()
+      ? r.endpoint_config.source.trim().toLowerCase()
+      : String(r.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    sourceToRepo.set(key, r);
+  }
+
+  const allSources = new Set([...repoCountMap.keys(), ...searchMap.keys(), ...sourceToRepo.keys()]);
+  const repositories = [...allSources]
+    .map((source) => {
+      const repoDoc = sourceToRepo.get(source);
+      return {
+        source,
+        name: repoDoc ? repoDoc.name : _humanizeSource(source),
+        datasetsIndexed: repoCountMap.get(source) || 0,
+        searchesServed: searchMap.get(source) || 0,
+        datasetCount: repoDoc && typeof repoDoc.dataset_count === 'number' ? repoDoc.dataset_count : null,
+        syncStatus: repoDoc && repoDoc.sync_status ? repoDoc.sync_status : null,
+        lastSyncAt: repoDoc && repoDoc.last_sync_at ? repoDoc.last_sync_at : null,
+      };
+    })
+    .sort((a, b) => b.datasetsIndexed - a.datasetsIndexed || b.searchesServed - a.searchesServed || a.name.localeCompare(b.name));
+
+  // ── Widget 3: per-day + overall + stage stats from REAL durations ──────────
+  const daily = perfByDay.map((d) => {
+    const sorted = [...(d.durations || [])].sort((a, b) => a - b);
+    return {
+      day: d.day,
+      count: d.count,
+      avgMs: Math.round((d.avgMs || 0) * 10) / 10,
+      medianMs: _percentile(sorted, 50),
+      minMs: sorted.length ? sorted[0] : null,
+      maxMs: sorted.length ? sorted[sorted.length - 1] : null,
+      p95Ms: _percentile(sorted, 95),
+    };
+  });
+  const allDurations = perfByDay.flatMap((d) => d.durations || []).sort((a, b) => a - b);
+  const overall = {
+    totalOps: allDurations.length,
+    avgMs: allDurations.length ? Math.round((allDurations.reduce((a, b) => a + b, 0) / allDurations.length) * 10) / 10 : 0,
+    medianMs: _percentile(allDurations, 50),
+    minMs: allDurations.length ? allDurations[0] : null,
+    maxMs: allDurations.length ? allDurations[allDurations.length - 1] : null,
+    p95Ms: _percentile(allDurations, 95),
+  };
+
+  // Only stages that are genuinely persisted get values; the rest stay null so
+  // the UI can state "Historical stage metrics are not persisted" instead of
+  // estimating.
+  const stageMap = { parse_query: 'queryParser', repository_search: 'repositorySearch', fallback: 'webDiscovery' };
+  const stages = {
+    queryParser: null,
+    mongoSearch: null,
+    repositorySearch: null,
+    metadataEnrichment: null,
+    verification: null,
+    ranking: null,
+    webDiscovery: null,
+  };
+  for (const s of perfByAgent) {
+    const key = stageMap[s._id];
+    if (key) stages[key] = {
+      count: s.count,
+      avgMs: Math.round((s.avgMs || 0) * 10) / 10,
+      errors: s.errors || 0,
+    };
+  }
+
+  // ── Widget 4: outcome stats from QueryLog + real agent failures ────────────
+  const o = outcomeStats[0] || {};
+  const searchOutcomes = {
+    total: o.total || 0,
+    withResults: o.withResults || 0,
+    noResults: o.noResults || 0,
+    bySource: {
+      cache: o.cache || 0,
+      merged: o.merged || 0,
+      fallback: o.fallback || 0,
+    },
+    avgResultsPerSearch: o.avgResultsPerSearch != null ? Math.round(o.avgResultsPerSearch * 100) / 100 : null,
+    mostCommonQuery: topQuery[0] || null,
+    mostCommonEmptyQuery: topEmptyQuery[0] || null,
+    failedSearchOperations: agentErrorCount || 0,
+    topFailureReason: topErrorReason[0] ? topErrorReason[0].reason : null,
+    topFailedQuery: topFailedQuery[0] ? topFailedQuery[0].query : null,
+  };
+
+  return new ApiResponse(200, {
+    series, users, saved, collections, cacheHitRate, mergedCount,
+    repositories, searchPerformance: { daily, overall, stages }, searchOutcomes,
+  }).send(res);
 });
 
 // ─── Dashboard (§11.8) ────────────────────────────────────────────────────────
