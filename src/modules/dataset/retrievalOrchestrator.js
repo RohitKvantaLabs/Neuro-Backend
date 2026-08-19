@@ -24,6 +24,7 @@ const logger                                      = require('../../utils/logger'
 const env                                         = require('../../config/env.config');
 const { parseQuery, runFallbackSearch, runRepositorySearch } = require('../agent/agent.client');
 const { searchMongoDB }                           = require('./dataset.service');
+const { catalogSearch }                           = require('./catalogSearch.service'); // Option B hybrid branch
 const { analyzeQueryComplexity }                  = require('./queryComplexityAnalyzer');
 const { computeRetrievalQuality, evaluate, evaluateAfterRepositories } = require('./discoveryPolicy');
 const { rank }                                    = require('./rankingEngine');
@@ -101,9 +102,31 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
   }
 
   // ──────────────────────────────────────────────
-  // Step 4: Compute Retrieval Quality
+  // Step 3b: Catalog Retrieval (Option B hybrid — additive branch)
+  // Only runs when FF_USE_CATALOG=true. The existing searchMongoDB path
+  // above is completely unchanged regardless of this flag.
   // ──────────────────────────────────────────────
-  const quality = computeRetrievalQuality(mongodbResults, filters, complexity);
+  let catalogResults = [];
+  if (env.featureFlags?.useCatalog) {
+    try {
+      catalogResults = await catalogSearch(filters);
+      logger.info(`[Orchestrator] Catalog branch — ${catalogResults.length} candidates`);
+    } catch (err) {
+      // Catalog failure: degrade gracefully, existing datasets results remain.
+      logger.warn(`[Orchestrator] Catalog search failed: ${err.message} — continuing without catalog`);
+      catalogResults = [];
+    }
+  }
+
+  // ──────────────────────────────────────────────
+  // Step 4: Compute Retrieval Quality
+  // When FF_USE_CATALOG=true the combined local pool (catalog+datasets) is
+  // evaluated. DiscoveryPolicy.computeRetrievalQuality() is pool-agnostic
+  // (it reads any array of dataset-shaped docs) — no policy code changes.
+  // When FF_USE_CATALOG=false, localPool === mongodbResults (flag-off parity).
+  // ──────────────────────────────────────────────
+  const localPool = catalogResults.length > 0 ? [...mongodbResults, ...catalogResults] : mongodbResults;
+  const quality = computeRetrievalQuality(localPool, filters, complexity);
 
   // ──────────────────────────────────────────────
   // Step 5: Discovery Policy Evaluation
@@ -149,7 +172,8 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
     }
 
     // Tier 2: web discovery only if repositories didn't satisfy quality (§4.4).
-    const combined = [...mongodbResults, ...repositoryResults];
+    // localPool already contains catalog+datasets; include repo results for re-evaluation.
+    const combined = [...localPool, ...repositoryResults];
     const postRepoQuality = computeRetrievalQuality(combined, filters, complexity);
     let webDecision;
     try {
@@ -185,15 +209,20 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
 
   // ──────────────────────────────────────────────
   // Step 7: Layer 3 — Merge (3 pools) + Rank (§4.5)
+  // When FF_USE_CATALOG=true: catalog results are combined with mongodbResults
+  // as the first pool argument so datasets docs win on identical source:source_id
+  // (datasets pool appears first in [...mongodbResults, ...catalogResults]).
+  // rankingEngine.js rank()/deduplicate() are NOT modified.
+  // When FF_USE_CATALOG=false: localPool === mongodbResults (identical behavior).
   // ──────────────────────────────────────────────
   let rankedResults;
   try {
-    rankedResults = rank(mongodbResults, repositoryResults, discoveryResults, filters);
+    rankedResults = rank(localPool, repositoryResults, discoveryResults, filters);
   } catch (err) {
     // §7.5: Ranking failure → return unranked merged results
     logger.error(`[Orchestrator] Layer 3 ranking failed: ${err.message} — returning unranked`);
     rankedResults = [
-      ...mongodbResults.map((ds) => ({ ...ds, _source: 'mongodb' })),
+      ...localPool.map((ds) => ({ ...ds, _source: ds._source || 'mongodb' })),
       ...discoveryResults.map((ds) => ({ ...ds, _source: 'discovery' })),
     ];
   }
@@ -213,6 +242,7 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
     metrics: {
       totalFound:       rankedResults.length,
       fromMongoDB:      mongodbResults.length,
+      fromCatalog:      catalogResults.length,   // NEW — catalog candidates (0 when flag OFF)
       fromRepository:   repositoryResults.length,
       fromDiscovery:    discoveryResults.length,
       queryComplexity:  complexity.level,
