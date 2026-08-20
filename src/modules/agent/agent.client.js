@@ -67,14 +67,40 @@ async function parseQuery(query, userId = null, userEmail = 'anonymous') {
     )();
     const filters = data?.filters && typeof data.filters === 'object' ? data.filters : {};
 
+    const modality = Array.isArray(filters.modality) ? filters.modality : [];
+    const species = Array.isArray(filters.species) ? filters.species : [];
+    const condition = Array.isArray(filters.condition) ? filters.condition : [];
+    const task = filters.task || null;
+    const region = filters.region || null;
+    const age_range = filters.age_range || null;
+    const format = Array.isArray(filters.format) ? filters.format : [];
+
+    const hasStructuredSignal = Boolean(
+      modality.length > 0 || species.length > 0 || condition.length > 0 ||
+      task || region || age_range || format.length > 0
+    );
+    const text = (query || '').toLowerCase().trim();
+    const neuroKeywords = [
+      'fmri', 'eeg', 'meg', 'smri', 'dti', 'pet', 'ieeg', 'adhd', 'alzheimer', 'dementia',
+      'autism', 'parkinson', 'depression', 'epilepsy', 'covid', 'schizophrenia', 'bipolar',
+      'seizure', 'hippocampus', 'amygdala', 'cerebellum', 'thalamus', 'striatum', 'cortex',
+      'brainstem', 'bids', 'nifti', 'dicom', 'neuroscience', 'neuroimaging', 'brain',
+      'dataset', 'datasets', 'electrophysiology', 'connectome'
+    ];
+    const hasNeuroKeyword = text.length > 0 && neuroKeywords.some((k) => text.includes(k));
+    const in_domain = hasStructuredSignal || hasNeuroKeyword;
+
     const result = {
       ...filters,
       raw_query: query,
-      modality: Array.isArray(filters.modality) ? filters.modality : [],
-      species: Array.isArray(filters.species) ? filters.species : [],
-      condition: Array.isArray(filters.condition) ? filters.condition : [],
-      task: filters.task || null,
-      format: Array.isArray(filters.format) ? filters.format : [],
+      modality,
+      species,
+      condition,
+      task,
+      region,
+      age_range,
+      format,
+      in_domain,
     };
 
     // ponytail: store in cache before returning.
