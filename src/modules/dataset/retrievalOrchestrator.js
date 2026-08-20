@@ -86,6 +86,28 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
   }
 
   // ──────────────────────────────────────────────
+  // Domain guard: stop here if the parser found no neuroscience signal.
+  // in_domain defaults to true (undefined = API was down, don't block).
+  // Only explicit false (set by the Python agent after successful LLM/heuristic
+  // parse) stops retrieval — all downstream stages are NOT INVOLVED.
+  // ──────────────────────────────────────────────
+  if (filters.in_domain === false) {
+    logger.info(`[Orchestrator] OUT_OF_DOMAIN — query rejected before retrieval: "${query}"`);
+    return {
+      source: 'out_of_domain',
+      results: [],
+      filters,
+      metrics: {
+        totalFound: 0, fromMongoDB: 0, fromCatalog: 0,
+        fromRepository: 0, fromDiscovery: 0,
+        queryComplexity: 'none', qualityScore: 0,
+        discoveryReason: 'Query rejected as out-of-domain before retrieval.',
+        signals: [], latencyMs: Date.now() - startMs,
+      },
+    };
+  }
+
+  // ──────────────────────────────────────────────
   // Step 2: Query Complexity Analysis
   // ──────────────────────────────────────────────
   const complexity = analyzeQueryComplexity(filters);
