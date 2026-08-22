@@ -1,5 +1,5 @@
 const express = require('express');
-const { search, getById } = require('./dataset.controller');
+const { search, getById, getPopular } = require('./dataset.controller');
 const { toggleReaction, getReactionsBatch } = require('./datasetReaction.controller');
 const { requireAuth, optionalAuth } = require('../auth/auth.middleware');
 const { requireOnboardingComplete } = require('../../middleware/requireOnboardingComplete');
@@ -13,6 +13,9 @@ router.post('/search', requireAuth, requireOnboardingComplete, searchLimiter, se
 // Dataset search reactions (like / dislike) by dataset serial number / ID
 router.post('/reactions', optionalAuth, toggleReaction);
 router.post('/reactions/batch', optionalAuth, getReactionsBatch);
+
+// Public — no auth required; strictly ≤6 admin-curated popular datasets
+router.get('/popular', getPopular);
 
 // Public read — no auth needed for dataset detail page
 router.get('/:id', getById);

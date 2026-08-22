@@ -10,6 +10,9 @@ const Dataset = require('./dataset.model');
 const { User } = require('../user/user.model');
 const QueryLog = require('../queryLog/queryLog.model');
 const SearchHistory = require('../user/searchHistory.model');
+const { PopularDataset } = require('./popularDataset.model');
+const { AdminDatasetOverride } = require('./adminDatasetOverride.model');
+const { resolveDatasetMetadata } = require('../../utils/datasetMetadataResolver.util');
 
 /**
  * POST /datasets/search
@@ -162,5 +165,86 @@ const getById = asyncHandler(async (req, res) => {
   return new ApiResponse(200, dataset).send(res);
 });
 
-module.exports = { search, getById };
+/**
+ * GET /datasets/popular
+ * Public endpoint — returns ≤6 admin-published PopularDataset records ordered by displayOrder ASC.
+ * Resolves metadata from AdminDatasetOverride → canonical Dataset.
+ * Excludes records whose canonical dataset is inactive (is_active=false) or missing.
+ * ponytail: limit enforced at DB level (.limit(6)), not in JS.
+ */
+const MAX_PUBLIC_POPULAR = 6;
+
+const getPopular = asyncHandler(async (req, res) => {
+  const popularDocs = await PopularDataset.find({ status: 'published' })
+    .sort({ displayOrder: 1 })
+    .limit(MAX_PUBLIC_POPULAR)
+    .lean();
+
+  if (popularDocs.length === 0) {
+    return new ApiResponse(200, { items: [] }).send(res);
+  }
+
+  const datasetIds = popularDocs.map((d) => d.datasetId);
+
+  // Fetch canonical datasets and overrides in parallel
+  const mongoose = require('mongoose');
+  const objectIds = datasetIds.filter((id) => mongoose.Types.ObjectId.isValid(id)).map((id) => new mongoose.Types.ObjectId(id));
+  const [canonicalDocs, overrideDocs] = await Promise.all([
+    Dataset.find({
+      $or: [
+        { _id: { $in: objectIds } },
+        { source_id: { $in: datasetIds } },
+      ],
+      is_active: { $ne: false },
+    }).lean(),
+    AdminDatasetOverride.find({ datasetId: { $in: datasetIds } }).lean(),
+  ]);
+
+  // Build lookup maps
+  const canonicalMap = {};
+  canonicalDocs.forEach((doc) => {
+    if (doc._id) canonicalMap[doc._id.toString()] = doc;
+    if (doc.source_id) canonicalMap[doc.source_id] = doc;
+  });
+  const overrideMap = {};
+  overrideDocs.forEach((doc) => { overrideMap[doc.datasetId] = doc; });
+
+  const items = [];
+  for (const pop of popularDocs) {
+    const canonical = canonicalMap[pop.datasetId] || null;
+    if (!canonical) {
+      // ponytail: skip orphaned popular records; log for visibility
+      logger.warn(`Popular dataset ${pop.datasetId} has no active canonical dataset — skipped from public response`);
+      continue;
+    }
+    const override = overrideMap[pop.datasetId] || null;
+    const resolved = resolveDatasetMetadata(canonical, override);
+
+    // ponytail: only expose presentation fields; no admin/audit data
+    items.push({
+      datasetId: pop.datasetId,
+      displayOrder: pop.displayOrder,
+      title: pop.featuredTitleOverride || resolved.title,
+      description: resolved.description,
+      source: resolved.source,
+      source_id: resolved.source_id,
+      url: resolved.url,
+      doi: resolved.doi,
+      modality: resolved.modality,
+      species: resolved.species,
+      disease: resolved.disease,
+      tasks: resolved.tasks,
+      region: resolved.region,
+      ageGroup: resolved.ageGroup,
+      subjects: resolved.subjects,
+      size: resolved.size,
+      publicationYear: resolved.publicationYear,
+      studyDesign: resolved.studyDesign,
+    });
+  }
+
+  return new ApiResponse(200, { items }).send(res);
+});
+
+module.exports = { search, getById, getPopular };
 

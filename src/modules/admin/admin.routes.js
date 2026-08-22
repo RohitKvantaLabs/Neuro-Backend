@@ -32,15 +32,46 @@ router.use(requireAuth, requireAdmin);
 router.get('/users', listUsers);
 router.delete('/users/:id', deleteUser);             // §11.2
 
-// Datasets (pre-existing)
-router.get('/datasets', listDatasets);
-router.delete('/datasets/:datasetId', deleteDataset);
+// Curation & Overrides (Phase 3)
+const {
+  updateDatasetOverride,
+  deleteDatasetOverride,
+  publishPopularDataset,
+  unpublishPopularDataset,
+  reorderPopularDatasets,
+  archiveDataset,
+  restoreDataset,
+  hardDeleteDataset,
+} = require('./adminCuration.controller');
+
+router.patch('/datasets/:datasetId/override', updateDatasetOverride);
+router.delete('/datasets/:datasetId/override', deleteDatasetOverride);
+router.post('/datasets/:datasetId/archive', archiveDataset);
+router.post('/datasets/:datasetId/restore', restoreDataset);
+router.delete('/datasets/:datasetId', hardDeleteDataset);
+
+router.post('/moderation/popular/:datasetId/publish', publishPopularDataset);
+router.post('/moderation/popular/:datasetId/unpublish', unpublishPopularDataset);
+router.put('/moderation/popular/reorder', reorderPopularDatasets);
 
 // Repositories (§11.1)
 router.get('/repositories', listRepositories);
 router.post('/repositories', createRepository);
 router.delete('/repositories/:id', deleteRepository);
 router.post('/repositories/:id/resync', resyncRepository);
+
+// Moderation (Phase 2 & 4)
+const {
+  getPopularCandidates,
+  getDislikeQueue,
+  getDislikeDetail,
+  getPublishedCatalog,
+} = require('./adminModeration.controller');
+
+router.get('/moderation/popular-candidates', getPopularCandidates);
+router.get('/moderation/dislike-queue', getDislikeQueue);
+router.get('/moderation/dislike-queue/:datasetId', getDislikeDetail);
+router.get('/moderation/published', getPublishedCatalog);
 
 
 // Admin accounts

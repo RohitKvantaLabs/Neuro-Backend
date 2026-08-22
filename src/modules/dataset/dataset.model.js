@@ -41,6 +41,7 @@ const datasetSchema = new mongoose.Schema(
     access_tier: { type: String, enum: ['open', 'registered', 'restricted', null], default: null },
     doi:         { type: String, default: null },
     size_label:  { type: String, default: null }, // human-readable e.g. "184 GB"
+    is_active:   { type: Boolean, default: true, index: true },
   },
   {
     collection: 'datasets', // must match Python's COLLECTION_NAME in dataset_repository.py
