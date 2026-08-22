@@ -443,9 +443,84 @@ const getPublishedCatalog = asyncHandler(async (req, res) => {
   }).send(res);
 });
 
+/**
+ * GET /api/v1/admin/moderation/datasets/search
+ * Search active canonical datasets for manual Featured dataset selection.
+ * Excludes archived/inactive datasets. Indicates if dataset is already published.
+ */
+const searchCanonicalDatasetsForAdmin = asyncHandler(async (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(30, Math.max(1, parseInt(req.query.limit, 10) || 10));
+  const skip = (page - 1) * limit;
+
+  const match = { is_active: { $ne: false } };
+  if (q) {
+    const regex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    match.$or = [
+      { title: regex },
+      { source_id: regex },
+      { source: regex },
+      { description: regex },
+      { disease: regex },
+      { modality: regex },
+      { species: regex },
+    ];
+  }
+
+  const [total, docs] = await Promise.all([
+    Dataset.countDocuments(match),
+    Dataset.find(match)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+  ]);
+
+  const datasetIds = docs.map((doc) => (doc._id ? doc._id.toString() : doc.source_id)).filter(Boolean);
+
+  const publishedDocs =
+    datasetIds.length > 0
+      ? await PopularDataset.find({ datasetId: { $in: datasetIds }, status: 'published' }).lean()
+      : [];
+  const publishedSet = new Set(publishedDocs.map((pd) => pd.datasetId));
+
+  const items = docs.map((doc) => {
+    const id = doc._id ? doc._id.toString() : doc.source_id;
+    return {
+      datasetId: id,
+      title: doc.title || 'Untitled dataset',
+      repository: doc.source || 'unknown',
+      source: doc.source || 'unknown',
+      source_id: doc.source_id || null,
+      description: doc.description || null,
+      modality: Array.isArray(doc.modality) ? doc.modality : doc.modality ? [doc.modality] : [],
+      species: Array.isArray(doc.species) ? doc.species : [],
+      disease: doc.disease || null,
+      tasks: Array.isArray(doc.tasks) ? doc.tasks : [],
+      region: doc.region || null,
+      ageGroup: doc.age_group || null,
+      subjects: typeof doc.subject_count === 'number' ? doc.subject_count : null,
+      size: doc.size_label || null,
+      publicationYear: typeof doc.publication_year === 'number' ? doc.publication_year : null,
+      studyDesign: doc.study_design || null,
+      isPublished: publishedSet.has(id) || (doc.source_id ? publishedSet.has(doc.source_id) : false),
+    };
+  });
+
+  const totalPages = Math.ceil(total / limit) || 1;
+
+  return new ApiResponse(200, {
+    items,
+    pagination: { page, limit, total, totalPages },
+  }).send(res);
+});
+
 module.exports = {
   getPopularCandidates,
   getDislikeQueue,
   getDislikeDetail,
   getPublishedCatalog,
+  searchCanonicalDatasetsForAdmin,
 };
+

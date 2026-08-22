@@ -66,12 +66,14 @@ const {
   getDislikeQueue,
   getDislikeDetail,
   getPublishedCatalog,
+  searchCanonicalDatasetsForAdmin,
 } = require('./adminModeration.controller');
 
 router.get('/moderation/popular-candidates', getPopularCandidates);
 router.get('/moderation/dislike-queue', getDislikeQueue);
 router.get('/moderation/dislike-queue/:datasetId', getDislikeDetail);
 router.get('/moderation/published', getPublishedCatalog);
+router.get('/moderation/datasets/search', searchCanonicalDatasetsForAdmin);
 
 
 // Admin accounts
