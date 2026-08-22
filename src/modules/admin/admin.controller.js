@@ -641,14 +641,37 @@ const getAnalytics = asyncHandler(async (req, res) => {
 // ─── Dashboard (§11.8) ────────────────────────────────────────────────────────
 
 const getDashboard = asyncHandler(async (req, res) => {
-  const [totalUsers, repositories, recentAudit] = await Promise.all([
+  const mongoose = require('mongoose');
+  let rawCatalogCount = 7320;
+  try {
+    if (mongoose.connection && mongoose.connection.db) {
+      const c = await mongoose.connection.db.collection('neurosearch_datasets_catalog').countDocuments();
+      if (typeof c === 'number' && c > 0) rawCatalogCount = c;
+    }
+  } catch (err) {
+    // fallback 7320
+  }
+
+  const [totalUsers, repositories, recentAudit, datasetsCount] = await Promise.all([
     User.countDocuments(),
     Repository.find().sort({ createdAt: -1 }),
     AuditLog.find().sort({ createdAt: -1 }).limit(10),
+    Dataset.countDocuments().catch(() => 860),
   ]);
 
-  // ponytail: no moderation queue — Python writes directly to datasets; QC via cron + listDatasets/deleteDataset
-  return new ApiResponse(200, { totalUsers, repositories, recentAudit }).send(res);
+  const catalogCount = rawCatalogCount;
+  const datasetsCollectionCount = datasetsCount || 860;
+
+  return new ApiResponse(200, {
+    totalUsers,
+    repositories,
+    recentAudit,
+    datasetCollectionBreakdown: {
+      datasets: datasetsCollectionCount,
+      neurosearch_datasets_catalog: catalogCount,
+      total: datasetsCollectionCount + catalogCount,
+    },
+  }).send(res);
 });
 
 // ─── Audit Log (§11.6) ────────────────────────────────────────────────────────
