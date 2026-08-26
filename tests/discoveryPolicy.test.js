@@ -337,7 +337,7 @@ describe('evaluate — aggregation & boundaries', () => {
       },
       basicFilters
     );
-    expect(decision.confidence).toBe(0.8);
+    expect(decision.confidence).toBe(0.9);
     expect(decision.signals).toContain('low_result_count');
     expect(decision.signals).toContain('low_confidence_results');
     expect(decision.shouldDiscover).toBe(true);

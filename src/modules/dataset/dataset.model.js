@@ -38,6 +38,12 @@ const datasetSchema = new mongoose.Schema(
     region:      { type: String, default: null },
     age_group:   { type: String, default: null },
     disease:     { type: String, default: null },
+    // Retrieval V2 Phase 1 — task is first-class metadata. Value is a canonical
+    // TASK_VOCAB label ("resting-state", "working-memory", …; see Python
+    // app/data/vocab.py and candidateGenerator.js TASK_VOCAB mirror) written
+    // ONLY from dataset-owned evidence by Python Stage-3 enrichment/backfill.
+    // null means UNKNOWN in retrieval/ranking — never a mismatch.
+    task:        { type: String, default: null },
     access_tier: { type: String, enum: ['open', 'registered', 'restricted', null], default: null },
     doi:         { type: String, default: null },
     size_label:  { type: String, default: null }, // human-readable e.g. "184 GB"
@@ -52,6 +58,7 @@ const datasetSchema = new mongoose.Schema(
 datasetSchema.index({ source: 1, source_id: 1 }, { unique: true });
 // ponytail: indexes for structured filter queries — avoids full collection scans.
 datasetSchema.index({ modality: 1 });
+datasetSchema.index({ task: 1 }); // Retrieval V2 — first-class task field
 datasetSchema.index({ species: 1 });
 datasetSchema.index({ keywords: 1 });
 datasetSchema.index({ trust_tier: 1, last_verified_at: 1 });

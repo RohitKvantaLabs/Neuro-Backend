@@ -29,6 +29,8 @@ const {
   computeTrustScore,
   modalityOverlap,
   regionOverlap,
+  normalizeTaskLabel,
+  taskOverlap,
 } = require('../src/modules/dataset/rankingEngine');
 
 // ---- Fixtures ------------------------------------------------------------
@@ -83,20 +85,18 @@ describe('computeMatchScore', () => {
     expect(result.requestedCount).toBe(0);
   });
 
-  it('scores proportionally for partial matches (graded modality credit)', () => {
+  it('scores 0 and penalizes for confirmed contradictions', () => {
     // condition also matches via keywords, so strip 'adhd' from keywords
     const result = computeMatchScore(
       makeDataset({ modality: ['EEG'], disease: 'none', keywords: ['resting-state'] }),
       { modality: ['fMRI'], condition: ['ADHD'] }
     );
     expect(result.matchCount).toBe(0);
+    expect(result.mismatchedCount).toBe(2); // both concepts CONFIRMED mismatched
     expect(result.requestedCount).toBe(2);
-    // EEG is declared but not in the fMRI synonym family → 0.35 partial credit
-    // (evidence exists → penalized, not zero); condition misses → 0.
-    // base = (0.35*1 + 0*1) / 2 = 0.175, no exact premium (0 matches).
-    expect(result.score).toBeCloseTo(0.175);
-    expect(result.credits.modality).toBe(0.35);
-    expect(result.credits.condition).toBe(0);
+    // EEG declared outside fMRI family & disease 'none' -> 0 credit + mismatch penalty = 0.
+    expect(result.score).toBe(0);
+    expect(result.credits.modality).toBe(0);
   });
 
   it('matches case-insensitively for modality and species', () => {
@@ -117,25 +117,40 @@ describe('computeMatchScore', () => {
     expect(result.score).toBe(1);
   });
 
-  it('penalizes (not excludes) a declared modality outside the synonym family', () => {
+  it('penalizes confirmed mismatches far below unknown (Retrieval V2 Phase 7)', () => {
+    // EEG declared vs fMRI requested → CONFIRMED mismatch:
+    // base = 0.35 (partial credit) − 0.25 (mismatch penalty) = 0.10.
     const result = computeMatchScore(
       makeDataset({ modality: ['eeg'] }),
       { modality: ['fMRI'] }
     );
     expect(result.matchDetails.modality).toBe(false);
-    // Declared-but-different modality gets partial evidence credit, not zero.
-    expect(result.score).toBeCloseTo(0.35);
-    expect(result.credits.modality).toBe(0.35);
+    expect(result.states.modality).toBe('mismatch');
+    expect(result.score).toBe(0);
+    expect(result.credits.modality).toBe(0);
   });
 
-  it('a declared modality is closer to the request than none (Issue 4 hierarchy)', () => {
-    const exactMeg = computeMatchScore(makeDataset({ modality: ['MEG'] }), { modality: ['MEG'] });
-    const mriInstead = computeMatchScore(makeDataset({ modality: ['MRI'] }), { modality: ['MEG'] });
-    const none = computeMatchScore(makeDataset({ modality: [] }), { modality: ['MEG'] });
-    // Exact match > declared-but-different > no declaration.
+  it('treats missing metadata as UNKNOWN — neutral, not failure (Phase 7)', () => {
+    // No modality declared → UNKNOWN: neutral credit 0.5, no mismatch penalty.
+    const result = computeMatchScore(
+      makeDataset({ modality: [] }),
+      { modality: ['fMRI'] }
+    );
+    expect(result.states.modality).toBe('unknown');
+    expect(result.score).toBeCloseTo(0.25);
+    expect(result.unknownCount).toBe(1);
+  });
+
+  it('three-state hierarchy: exact > unknown(neutral) > mismatch(penalized)', () => {
+    // Retrieval V2 deliberately replaces the V1 "declared-but-different beats
+    // nothing-declared" rule: with sparse metadata (modality 25% populated),
+    // an unknown must never be punished like a contradiction.
+    const filters = { modality: ['MEG'] };
+    const exactMeg = computeMatchScore(makeDataset({ modality: ['MEG'] }), filters);
+    const noDeclaration = computeMatchScore(makeDataset({ modality: [] }), filters);
+    const mriInstead = computeMatchScore(makeDataset({ modality: ['MRI'] }), filters);
     expect(exactMeg.score).toBe(1);
-    expect(mriInstead.score).toBeGreaterThan(none.score);
-    expect(exactMeg.score).toBeGreaterThan(mriInstead.score);
+    expect(noDeclaration.score).toBeGreaterThan(mriInstead.score); // unknown > mismatch
   });
 
   it('exact matches carry the premium over partial evidence (Parkinson MEG hierarchy)', () => {
@@ -149,9 +164,11 @@ describe('computeMatchScore', () => {
       makeDataset({ modality: [], disease: 'Parkinson disease' }), filters);
     const unrelated = computeMatchScore(
       makeDataset({ modality: [], disease: null, keywords: ['soil'] }), filters);
-    expect(parkinsonMeg.score).toBeGreaterThan(parkinsonMri.score);   // MEG > MRI
-    expect(parkinsonMri.score).toBeGreaterThan(genericParkinson.score); // MRI > generic Parkinson
-    expect(genericParkinson.score).toBeGreaterThan(unrelated.score);    // Parkinson > unrelated
+    expect(parkinsonMeg.score).toBeGreaterThan(parkinsonMri.score);   // MEG > MRI-declared-mismatch
+    expect(genericParkinson.score).toBeGreaterThan(unrelated.score);  // Parkinson > unrelated
+    // Retrieval V2: unknown modality (generic Parkinson, neutral 0.5 credit)
+    // outranks a CONFIRMED modality mismatch (MRI declared, MEG requested).
+    expect(genericParkinson.score).toBeGreaterThan(parkinsonMri.score);
   });
 
   it('modalityOverlap handles families, direct, and prefix cases', () => {
@@ -208,20 +225,47 @@ describe('computeMatchScore', () => {
     expect(result.score).toBe(1);
   });
 
-  it('matches task from the title/description free text, not just keywords', () => {
+  it('task participates as first-class metadata — stored canonical field wins (Phase 11)', () => {
+    // dataset.task is the canonical stored label; "working memory" (parser
+    // variant) normalizes to the same "working-memory" family.
     const result = computeMatchScore(
-      makeDataset({ title: 'Working memory capacity in adolescents (fMRI)', keywords: [] }),
+      makeDataset({ title: 'Some study', keywords: [], task: 'working-memory' }),
       { task: 'working memory' }
     );
-    expect(result.matchDetails.task).toBe(true);
+    expect(result.states.task).toBe('match');
+    expect(result.evidence.task).toEqual(['task']);
     expect(result.score).toBe(1);
-    // A resting-state dataset must NOT match a working-memory request.
+  });
+
+  it('null task with no contrary evidence stays UNKNOWN, never mismatched', () => {
+    const result = computeMatchScore(
+      makeDataset({ title: 'Cortical thickness in aging', description: '', keywords: [], task: null }),
+      { task: 'resting-state' }
+    );
+    expect(result.states.task).toBe('unknown');
+    // Unknown → neutral credit 0.5 * coverage factor 0.5 = 0.25.
+    expect(result.score).toBeCloseTo(0.25);
+  });
+
+  it('a different canonical task in text/evidence is a CONFIRMED mismatch', () => {
+    // A resting-state dataset must NOT match a working-memory request:
+    // free text declares the contrary paradigm.
     const miss = computeMatchScore(
       makeDataset({ keywords: [] }),
       { task: 'working memory' }
     );
-    expect(miss.matchDetails.task).toBe(false);
+    expect(miss.states.task).toBe('mismatch');
     expect(miss.score).toBe(0);
+  });
+
+  it('normalizes task variants onto canonical labels (Phase 13 vocabulary)', () => {
+    expect(normalizeTaskLabel('Resting state')).toBe('resting-state');
+    expect(normalizeTaskLabel('rs-fMRI')).toBe('resting-state');
+    expect(normalizeTaskLabel('working memory')).toBe('working-memory');
+    expect(taskOverlap('working memory', 'working-memory')).toBe(true);
+    expect(taskOverlap('resting-state', 'working-memory')).toBe(false);
+    expect(normalizeTaskLabel(null)).toBe(null);
+    expect(normalizeTaskLabel('quantum knitting')).toBe(null); // unknown stays unknown
   });
 });
 
@@ -428,5 +472,148 @@ describe('rank', () => {
     expect(typeof result._diversityBonus).toBe('number');
     expect(result._matchDetails.credits).toBeDefined();
     expect(result._matchDetails.credits.modality).toBe(1);
+  });
+
+  it('attaches three-state coverage to every ranked result (Phase 8)', () => {
+    const [result] = rank(
+      [makeDataset({ source_id: 'ds001', age_group: null, disease: null })],
+      [],
+      { modality: ['fMRI'], condition: ['ADHD'], age_range: 'child' }
+    );
+    expect(result._matchDetails.coverage).toEqual({ matched: 2, mismatched: 0, unknown: 1 });
+    expect(result._matchDetails.states.age_range).toBe('unknown');
+    expect(result._matchDetails.states.condition).toBe('match');
+  });
+});
+
+// ---- Retrieval V2 end-to-end ranking scenarios (Phase 16 TESTs 1/2/7) ----
+
+describe('Retrieval V2 — relevance scenarios', () => {
+  const queryFilters = { modality: ['fMRI'], condition: ['ADHD'], age_range: 'child' };
+
+  const pediatricMatch = () =>
+    makeDataset({
+      source_id: 'ped-1',
+      title: 'Multimodal resting state networks in pediatric ADHD',
+      modality: ['fMRI'],
+      disease: 'ADHD',
+      age_group: 'child',
+      keywords: ['adhd', 'fmri'],
+    });
+
+  const adultContradiction = () =>
+    makeDataset({
+      source_id: 'adu-1',
+      title: 'Adult ADHD resting-state fMRI',
+      modality: ['fMRI'],
+      disease: 'ADHD',
+      age_group: 'adult', // CONFIRMED mismatch vs requested child
+      keywords: ['adhd', 'fmri'],
+    });
+
+  it('TEST 2: pediatric match outranks adult contradiction even when the adult record is fresher and verified', () => {
+    const pediatric = pediatricMatch();
+    const adult = adultContradiction();
+    // Give the contradictory record every secondary advantage.
+    adult.quality_score = 1.0;
+    adult.trust_tier = 'verified';
+    adult.updated_at = daysAgo(5); // freshness 1.0
+    pediatric.quality_score = 0.6;
+    pediatric.trust_tier = 'unverified';
+    pediatric.updated_at = daysAgo(200); // freshness 0.6
+
+    const [first] = rank([adult, pediatric], [], queryFilters);
+    expect(first.source_id).toBe('ped-1');
+  });
+
+  it('TEST 2: confirmed mismatch receives a meaningful penalty (math check)', () => {
+    const m = computeMatchScore(adultContradiction(), queryFilters);
+    expect(m.mismatchedCount).toBe(1);
+    expect(m.score).toBeCloseTo(0.4944, 3);
+    expect(m.score).toBeLessThan(computeMatchScore(pediatricMatch(), queryFilters).score);
+  });
+
+  it('TEST 1: fully-matching candidate ranks above unknown-metadata candidates; unknown ≠ mismatch', () => {
+    const allUnknown = makeDataset({
+      source_id: 'unk-1',
+      title: 'Some collection of neuroimaging data', // no concept evidence at all
+      description: '',
+      modality: [],
+      species: [],
+      disease: null,
+      keywords: ['neuroimaging'],
+      region: null,
+      age_group: null,
+    });
+    const ranked = rank([allUnknown, pediatricMatch()], [], queryFilters);
+    expect(ranked[0].source_id).toBe('ped-1');
+    const unknownEntry = ranked.find((r) => r.source_id === 'unk-1');
+    expect(unknownEntry._matchDetails.states.age_range).toBe('unknown');
+    expect(unknownEntry._matchDetails.coverage.unknown).toBeGreaterThanOrEqual(2);
+  });
+
+  it('5/5 confirmed match strictly outranks 3/5 candidate despite secondary diversity bonus', () => {
+    const fullMatch = makeDataset({
+      source_id: 'full-5',
+      source: 'zenodo',
+      title: 'Wavelet variance coefficients of children with ADHD',
+      modality: ['fMRI'],
+      species: ['human'],
+      disease: 'adhd',
+      age_group: 'child',
+      task: 'resting-state',
+      quality_score: 0.69,
+      trust_tier: 'verified',
+    });
+    const partialMatch = makeDataset({
+      source_id: 'part-3',
+      source: 'neurovault', // gets singleton diversity bonus +0.50 * 0.05 = +0.025
+      title: 'The structural-functional connectome',
+      modality: ['fMRI'],
+      species: ['human'],
+      disease: null,
+      age_group: null,
+      task: 'resting-state',
+      quality_score: 0.63,
+      trust_tier: 'verified',
+    });
+
+    const ranked = rank([partialMatch, fullMatch], [], {
+      modality: ['fMRI'],
+      species: ['human'],
+      condition: ['ADHD'],
+      task: 'resting-state',
+      age_range: 'child',
+    });
+
+    expect(ranked[0].source_id).toBe('full-5');
+  });
+
+  it('deduplicates datasets with doi: prefix vs raw DOI string across repositories', () => {
+    const docZenodo = makeDataset({
+      source: 'zenodo',
+      source_id: '6904112',
+      doi: '10.5061/dryad.fxpnvx0vc',
+      title: 'Date advanced functional nuclear magnetic resonance',
+    });
+    const docDryad = makeDataset({
+      source: 'dryad',
+      source_id: 'dryad.fxpnvx0vc',
+      doi: 'doi:10.5061/dryad.fxpnvx0vc',
+      title: 'Date advanced functional nuclear magnetic resonance',
+    });
+
+    const merged = deduplicate([docZenodo, docDryad]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].source_id).toBe('6904112');
+  });
+
+  it('recognizes "functional nuclear magnetic resonance" as generic MRI modality synonym', () => {
+    const res = computeMatchScore(
+      makeDataset({ modality: ['functional nuclear magnetic resonance'] }),
+      { modality: ['mri'] }
+    );
+    expect(res.matchDetails.modality).toBe(true);
+    expect(res.states.modality).toBe('match');
   });
 });

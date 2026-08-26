@@ -40,7 +40,7 @@ function buildMongoQuery(filters = {}) {
   addFieldMatch(normalizedFilters.modality, 'modality');
   addFieldMatch(normalizedFilters.species, 'species');
   addFieldMatch(normalizedFilters.disease || normalizedFilters.condition, 'disease');
-  addFieldMatch(normalizedFilters.task, 'keywords');
+  addFieldMatch(normalizedFilters.task, 'task'); // Retrieval V2 — primary field 'task'
   addFieldMatch(normalizedFilters.format, 'keywords');
   addFieldMatch(normalizedFilters.repository, 'source');
   addFieldMatch(normalizedFilters.age_group || normalizedFilters.ageGroup, 'age_group');

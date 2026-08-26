@@ -18,8 +18,26 @@ jest.mock('../src/modules/agent/agent.client', () => ({
   runRepositorySearch: jest.fn(),
 }));
 
+jest.mock('../src/modules/dataset/catalogSearch.service', () => ({
+  catalogSearch: jest.fn().mockResolvedValue([]),
+}));
+
 jest.mock('../src/modules/dataset/dataset.service', () => ({
   searchMongoDB: jest.fn(),
+}));
+
+jest.mock('../src/modules/dataset/candidateGenerator', () => ({
+  generateCandidates: jest.fn().mockImplementation(async (filters) => {
+    const { searchMongoDB } = require('../src/modules/dataset/dataset.service');
+    const candidates = await searchMongoDB(filters);
+    return {
+      candidates: candidates || [],
+      levelsUsed: [1],
+      droppedWeak: 0,
+      coverageDistribution: {},
+    };
+  }),
+  extractHardConstraints: jest.fn().mockReturnValue(null),
 }));
 
 // Pin the orchestrator on; repository layer + web discovery on by default.

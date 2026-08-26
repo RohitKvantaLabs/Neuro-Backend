@@ -28,6 +28,49 @@ const defaults = {
   decisionThreshold: 0.5,
 };
 
+// Bounded multi-signal aggregation (Retrieval V2 Phase 14).
+//
+// BEFORE (V1): aggregatedConfidence = Math.max(triggered weights) — multiple
+// meaningful weak signals could never combine (0.4 + 0.3 stayed 0.4 < 0.5),
+// so discovery under-triggered exactly when local coverage was broadly poor.
+//
+// AFTER (V2): discounted accumulation over the TOP-K signals:
+//   confidence = Σ w_i · DECAY^i   (weights sorted DESC, i from 0)
+//   capped at CAP.
+//
+// Properties (cost discipline preserved):
+//   - a single strong signal still triggers on its own (decay^0 = 1);
+//   - two meaningful weak signals CAN combine: 0.4 + 0.3·0.6 = 0.58 ≥ 0.5;
+//   - a single weak signal still cannot: 0.4 or 0.3 < 0.5 (no trivial
+//     single-signal discovery);
+//   - many trivial signals cannot force discovery: only the TOP-K=3 largest
+//     weights participate, the geometric decay shrinks each follower, and the
+//     hard cap bounds worst-case spend;
+//   - every decision is explainable: per-signal contributions are returned
+//     for telemetry.
+const AGGREGATION_TOP_K = 3;
+const AGGREGATION_DECAY = 0.6;
+const AGGREGATION_CAP = 0.9;
+
+/**
+ * Aggregate triggered signals into one bounded confidence plus an explainable
+ * contribution breakdown (telemetry, Phase 14 requirement).
+ */
+function aggregateSignals(triggered) {
+  const sorted = [...triggered].sort((a, b) => b.weight - a.weight).slice(0, AGGREGATION_TOP_K);
+  let total = 0;
+  const contributions = sorted.map((s, i) => {
+    const factor = Math.pow(AGGREGATION_DECAY, i);
+    const contribution = Math.round(((s.weight * factor) + Number.EPSILON) * 10000) / 10000;
+    total += contribution;
+    return { signal: s.name, weight: s.weight, factor, contribution };
+  });
+  return {
+    confidence: Math.min(Math.round(total * 10000) / 10000, AGGREGATION_CAP),
+    contributions,
+  };
+}
+
 function getThresholds() {
   const dp = env.discoveryPolicy || {};
   return {
@@ -61,7 +104,15 @@ function computeFieldCoverage(results, filters) {
         (ds.keywords || []).some((k) => k.toLowerCase().includes(v))
       );
     },
-    task: (ds, val) => (ds.keywords || []).some((k) => k.toLowerCase().includes(val.toLowerCase())),
+    // Retrieval V2 Phase 11: task is first-class metadata — coverage checks
+    // the stored canonical task field as well as keywords.
+    task: (ds, val) =>
+      (ds.keywords || []).some((k) => k.toLowerCase().includes(val.toLowerCase())) ||
+      Boolean(
+        ds.task &&
+          (String(ds.task).toLowerCase().includes(val.toLowerCase()) ||
+            val.toLowerCase().includes(String(ds.task).toLowerCase()))
+      ),
     region: (ds, val) => (ds.region || '').toLowerCase().includes(val.toLowerCase()),
     age_range:  (ds, val) => (ds.age_group || '').toLowerCase().includes(val.toLowerCase()),
     age_group:  (ds, val) => (ds.age_group || '').toLowerCase().includes(val.toLowerCase()),
@@ -243,15 +294,19 @@ function _evaluateCore(quality, filters, options = {}, thresholds = getThreshold
     triggered.push({ name: 'low_confidence_results', weight: 0.3 });
   }
 
-  // Aggregate: take MAX weight of all triggered signals
-  const aggregatedConfidence = triggered.length > 0
-    ? Math.max(...triggered.map((s) => s.weight))
-    : 0;
+  // Aggregate: bounded discounted combination of the strongest signals
+  // (Retrieval V2 Phase 14) — replaces the V1 pure-MAX aggregation.
+  const { confidence: aggregatedConfidence, contributions } = triggered.length > 0
+    ? aggregateSignals(triggered)
+    : { confidence: 0, contributions: [] };
 
   const shouldDiscover = aggregatedConfidence >= thresholds.decisionThreshold;
 
   const reason = shouldDiscover
-    ? triggered.map((s) => s.detail || s.name).join(', ')
+    ? triggered
+        .map((s) => s.detail || s.name)
+        .concat([`aggregation=${contributions.map((c) => `${c.signal}:${c.contribution}`).join(' + ')}`])
+        .join(', ')
     : null;
 
   return {
@@ -306,4 +361,4 @@ function evaluateAfterRepositories(quality, filters, options = {}) {
   };
 }
 
-module.exports = { evaluate, evaluateAfterRepositories, computeRetrievalQuality, computeFieldCoverage };
+module.exports = { evaluate, evaluateAfterRepositories, computeRetrievalQuality, computeFieldCoverage, aggregateSignals };

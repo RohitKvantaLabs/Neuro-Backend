@@ -56,7 +56,7 @@ const logger = require('../../utils/logger');
 const MODALITY_SYNONYMS = {
   fmri: new Set(['fmri', 'mri', 'functional mri', 'functional magnetic resonance imaging']),
   smri: new Set(['smri', 'mri', 'structural mri', 'structural magnetic resonance imaging']),
-  mri:  new Set(['mri', 'fmri', 'smri', 'functional mri', 'structural mri']),
+  mri:  new Set(['mri', 'fmri', 'smri', 'functional mri', 'structural mri', 'functional nuclear magnetic resonance', 'functional nuclear magnetic resonance imaging']),
   eeg:  new Set(['eeg', 'electroencephalography']),
   meg:  new Set(['meg', 'magnetoencephalography']),
   ieeg: new Set(['ieeg', 'intracranial eeg', 'ecog']),
@@ -108,6 +108,85 @@ function regionOverlap(requested, declared) {
   return false;
 }
 
+// ─── Retrieval V2 (Phase 11) — canonical task vocabulary ─────────────────────
+// Mirrors app/data/vocab.py TASK_VOCAB (single source of truth lives Python-
+// side; this is the retrieval/ranking mirror, same pattern as MODALITY_SYNONYMS
+// ↔ connectors/base.py). Canonical labels are hyphenated; variants normalize so
+// parsed "working memory" and stored "working-memory" share one token space.
+const TASK_VOCAB = {
+  'resting-state': ['resting state', 'resting-state', 'resting state fmri', 'resting-state fmri', 'rs-fmri', 'resting state functional mri'],
+  'working-memory': ['working memory', 'working-memory'],
+  motor: ['motor task', 'motor imagery', 'motor learning', 'finger tapping'],
+  attention: ['attention task', 'sustained attention', 'selective attention', 'divided attention', 'visual attention', 'attention network test'],
+  language: ['language task', 'language processing', 'speech production', 'sentence comprehension'],
+};
+
+/**
+ * Normalize a free-form task string onto the canonical TASK_VOCAB label.
+ * Returns null for empty/unknown input — unknown stays unknown (never mapped
+ * onto a near-miss label).
+ */
+function normalizeTaskLabel(value) {
+  if (!value) return null;
+  const v = String(value).trim().toLowerCase();
+  if (!v) return null;
+  for (const [label, tokens] of Object.entries(TASK_VOCAB)) {
+    if (v === label || tokens.includes(v)) return label;
+    for (const t of tokens) {
+      if (v.includes(t) || t.includes(v)) return label;
+    }
+  }
+  return null;
+}
+
+/**
+ * True when a requested task and a stored task/text fragment refer to the
+ * same canonical label (synonym-aware both directions).
+ */
+function taskOverlap(requested, declaredText) {
+  const r = normalizeTaskLabel(requested);
+  const d = normalizeTaskLabel(declaredText);
+  return Boolean(r && d && r === d);
+}
+
+/**
+ * Which OTHER canonical task labels appear in free text — used to distinguish
+ * a CONFIRMED task mismatch (text declares a different paradigm) from UNKNOWN.
+ */
+function otherTaskLabelInText(requested, text) {
+  const r = normalizeTaskLabel(requested);
+  const t = String(text || '').toLowerCase();
+  if (!t) return null;
+  for (const label of Object.keys(TASK_VOCAB)) {
+    if (label === r) continue;
+    for (const token of TASK_VOCAB[label]) {
+      if (t.includes(token)) return label;
+    }
+  }
+  return null;
+}
+
+// Concept states (Retrieval V2 Phases 7/10): every requested structured concept
+// evaluates to exactly one of:
+//   match    — dataset-owned evidence agrees with the request (credit 1)
+//   mismatch — dataset DECLARES a different value (partial credit + penalty)
+//   unknown  — no declaration exists (neutral credit; NOT a failure)
+const STATE = { MATCH: 'match', MISMATCH: 'mismatch', UNKNOWN: 'unknown' };
+
+// Neutral credit for UNKNOWN fields: neither rewarded nor penalized. Sparse
+// metadata is the norm (disease 13.77%, age_group 6.25% populated), so missing
+// data must not drag scores down like a contradiction does (Phase 7).
+const UNKNOWN_CREDIT = 0.5;
+
+// Confirmed-mismatch handling: a declared-but-different value represents a
+// confirmed contradiction (credit 0.0) PLUS an explicit per-field penalty so a
+// contradictory dataset cannot ride freshness/trust past a true match.
+const MODALITY_PARTIAL_CREDIT = 0.0;
+const SPECIES_PARTIAL_CREDIT  = 0.0;
+const CONCEPT_MISMATCH_CREDIT = 0.0; // condition / task / region / age_range
+const MISMATCH_PENALTY_PER_FIELD = 0.40;
+const MAX_MISMATCH_PENALTY = 0.60;
+
 // Query-first weights (§9.3, stabilization Issue 1): query relevance is the
 // dominant component; metadata quality, repository trust, freshness, and
 // diversity are secondary. Mirrored in env.config.js rankingEngine defaults.
@@ -139,13 +218,6 @@ const FIELD_WEIGHTS = {
 const EXACT_MATCH_BONUS = 0.10;
 const MAX_EXACT_PREMIUM = 0.30;
 
-// Partial credit when a *declared* modality/species exists but does not match
-// the request: the record carries modality evidence, so it is penalized but
-// not excluded (Issue 4). This is what separates "Parkinson + MRI" from
-// "generic Parkinson" when MEG is requested.
-const MODALITY_PARTIAL_CREDIT = 0.35;
-const SPECIES_PARTIAL_CREDIT  = 0.30;
-
 function getWeights() {
   const re = env.rankingEngine || {};
   return {
@@ -162,26 +234,39 @@ function getWeights() {
 /**
  * MatchScore (§9.4.1) — how well a dataset covers the requested filter fields.
  *
- * Query-first grading (stabilization Issue 2): each requested field
- * contributes a graded credit (0..1) instead of a binary hit/miss, so exact
- * matches carry an explicit premium over partial evidence:
- *   - modality: 1.0 on synonym-family match, 0.35 when a modality is declared
- *     but does not match the request (evidence exists → penalty, not zero),
- *     0 when nothing is declared.
- *   - species: 1.0 exact, 0.30 declared-but-different, 0 none.
- *   - condition / task / region / age_range / format / keywords: 1.0 match,
- *     else 0.
- * Score = weighted-credit average + exact-match premium (capped at 1.0).
- * ``matchDetails`` keeps the boolean per-field map and adds ``credits``.
+ * Retrieval V2 (Phases 7/10/11): every requested structured concept resolves
+ * to one of three states instead of binary hit/miss:
+ *   - MATCH    → credit 1.0 (+ exact-match premium)
+ *   - MISMATCH → dataset DECLARES a different value: partial credit
+ *                (modality 0.35 / species 0.30 / others 0.30 — evidence
+ *                exists, so penalized not zero) PLUS an explicit per-field
+ *                mismatch penalty so contradictory metadata cannot ride
+ *                freshness/trust past a true match.
+ *   - UNKNOWN  → no declaration in sparse metadata: neutral credit 0.5,
+ *                explicitly NOT treated as failure (disease 13.77%, age_group
+ *                6.25% populated — unknown must not sink a candidate).
+ *
+ * Task participates as first-class metadata: the stored canonical ``task``
+ * field is checked first (synonym-normalized), then keywords/title/description
+ * text evidence. A stored null task is UNKNOWN unless free text declares a
+ * DIFFERENT canonical paradigm (confirmed mismatch).
+ *
+ * Evidence (Phase 9): ``matchDetails[field]`` keeps the boolean result and
+ * ``evidence[field]`` lists WHERE the signal came from ('metadata', 'task',
+ * 'keywords', 'title', 'description') for diagnostics/dev explanations.
  */
 function computeMatchScore(dataset, filters) {
   const FILTER_FIELDS = ['modality', 'species', 'condition', 'task', 'region', 'age_range', 'format'];
   let matchedCount = 0;
+  let mismatchedCount = 0;
+  let unknownCount = 0;
   let requestedCount = 0;
   let weightedCredit = 0;
   let totalWeight = 0;
   const matchDetails = {};
   const credits = {};
+  const states = {};
+  const evidence = {};
 
   for (const field of FILTER_FIELDS) {
     const requested = filters[field];
@@ -189,60 +274,92 @@ function computeMatchScore(dataset, filters) {
 
     requestedCount++;
     const values = Array.isArray(requested) ? requested : [requested];
-    let matched = false;
-    let credit = 0;
+    let state = STATE.UNKNOWN;
+    let credit = UNKNOWN_CREDIT;
+    let sources = [];
 
     if (field === 'modality') {
       const declared = dataset.modality || [];
       if (values.some((v) => declared.some((m) => modalityOverlap(v, m)))) {
-        matched = true;
-        credit = 1;
+        state = STATE.MATCH; credit = 1; sources = ['metadata'];
       } else if (declared.length > 0) {
-        credit = MODALITY_PARTIAL_CREDIT; // declared but different family — partial evidence
+        state = STATE.MISMATCH; credit = MODALITY_PARTIAL_CREDIT; sources = ['metadata'];
       }
     } else if (field === 'species') {
       const declared = dataset.species || [];
       if (values.some((v) => declared.some((s) => s.toLowerCase() === v.toLowerCase()))) {
-        matched = true;
-        credit = 1;
+        state = STATE.MATCH; credit = 1; sources = ['metadata'];
       } else if (declared.length > 0) {
-        credit = SPECIES_PARTIAL_CREDIT;
+        state = STATE.MISMATCH; credit = SPECIES_PARTIAL_CREDIT; sources = ['metadata'];
       }
     } else if (field === 'condition') {
       // Bidirectional overlap: the parser may emit "Parkinson disease" while
       // Stage-3 enrichment stores the canonical label "parkinson" (or vice
-      // versa). Match when either side contains the other.
-      matched = values.some((v) => {
+      // versa). Match when either side contains the other. Keywords count as
+      // evidence too (sparse structured disease coverage — Phase 6 TEST 6).
+      const dl = (dataset.disease || '').toLowerCase();
+      let kwHit = false;
+      const condMatch = values.some((v) => {
         const vl = v.toLowerCase();
-        const dl = (dataset.disease || '').toLowerCase();
-        if (dl && (dl.includes(vl) || vl.includes(dl))) return true;
-        return (dataset.keywords || []).some((k) => {
+        if (dl && (dl.includes(vl) || vl.includes(dl))) { sources = ['metadata']; return true; }
+        kwHit = (dataset.keywords || []).some((k) => {
           const kl = k.toLowerCase();
           return kl.includes(vl) || vl.includes(kl);
         });
+        if (kwHit) sources = ['keywords'];
+        return kwHit;
       });
-      credit = matched ? 1 : 0;
+      if (condMatch) {
+        state = STATE.MATCH; credit = 1;
+      } else if (dl) {
+        state = STATE.MISMATCH; credit = CONCEPT_MISMATCH_CREDIT; sources = ['metadata'];
+      }
     } else if (field === 'task') {
-      // Task evidence lives in keywords AND the free-text title/description
-      // (e.g. "Working memory capacity in adolescents (fMRI)").
-      matched = values.some((v) => {
-        const vl = v.toLowerCase();
-        return (
-          (dataset.keywords || []).some((k) => k.toLowerCase().includes(vl)) ||
-          (dataset.title || '').toLowerCase().includes(vl) ||
-          (dataset.description || '').toLowerCase().includes(vl)
-        );
-      });
-      credit = matched ? 1 : 0;
+      // First-class task field (normalized), then keywords/title/description.
+      const storedTask = normalizeTaskLabel(dataset.task);
+      const textHaystacks = [
+        ['keywords', (dataset.keywords || []).join(' ')],
+        ['title', dataset.title || ''],
+        ['description', dataset.description || ''],
+      ];
+      if (storedTask && values.some((v) => taskOverlap(v, storedTask))) {
+        state = STATE.MATCH; credit = 1; sources = ['task'];
+      } else {
+        for (const [srcName, text] of textHaystacks) {
+          if (values.some((v) => taskOverlap(v, text) || String(text).toLowerCase().includes(String(v).toLowerCase()))) {
+            state = STATE.MATCH; credit = 1; sources = [srcName];
+            break;
+          }
+        }
+      }
+      if (state !== STATE.MATCH) {
+        // Confirmed mismatch ONLY on positive contrary evidence (Phase 7):
+        // a different canonical stored task, or text declaring another paradigm.
+        const contraryStored = storedTask && !values.some((v) => taskOverlap(v, storedTask));
+        const contraryText = textHaystacks.some(([, text]) =>
+          values.some((v) => otherTaskLabelInText(v, text)));
+        if (contraryStored || contraryText) {
+          state = STATE.MISMATCH; credit = CONCEPT_MISMATCH_CREDIT;
+          sources = contraryStored ? ['task'] : ['text'];
+        }
+      }
     } else if (field === 'region') {
-      matched = values.some((v) => (dataset.region ? regionOverlap(v, dataset.region) : false));
-      credit = matched ? 1 : 0;
+      if (values.some((v) => (dataset.region ? regionOverlap(v, dataset.region) : false))) {
+        state = STATE.MATCH; credit = 1; sources = ['metadata'];
+      } else if (dataset.region) {
+        state = STATE.MISMATCH; credit = CONCEPT_MISMATCH_CREDIT; sources = ['metadata'];
+      }
     } else if (field === 'age_range') {
-      matched = values.some((v) => (dataset.age_group || '').toLowerCase().includes(v.toLowerCase()));
-      credit = matched ? 1 : 0;
+      const ag = (dataset.age_group || '').toLowerCase();
+      if (values.some((v) => v && ag.includes(v.toLowerCase())) ||
+          values.some((v) => v && v.toLowerCase().includes(ag) && ag)) {
+        state = STATE.MATCH; credit = 1; sources = ['metadata'];
+      } else if (ag) {
+        state = STATE.MISMATCH; credit = CONCEPT_MISMATCH_CREDIT; sources = ['metadata'];
+      }
     } else if (field === 'format') {
       // Format evidence (NIfTI / BIDS / DICOM) can also appear in free text.
-      matched = values.some((v) => {
+      const fmtMatch = values.some((v) => {
         const vl = v.toLowerCase();
         return (
           (dataset.keywords || []).some((k) => k.toLowerCase().includes(vl)) ||
@@ -250,12 +367,19 @@ function computeMatchScore(dataset, filters) {
           (dataset.description || '').toLowerCase().includes(vl)
         );
       });
-      credit = matched ? 1 : 0;
+      if (fmtMatch) {
+        state = STATE.MATCH; credit = 1; sources = ['text'];
+      }
+      // No structured format field exists → never a confirmed mismatch.
     }
 
-    matchDetails[field] = matched;
-    credits[field] = credit;
-    if (matched) matchedCount++;
+    matchDetails[field] = state === STATE.MATCH;
+    credits[field] = state === STATE.UNKNOWN ? 0 : credit;
+    states[field] = state;
+    evidence[field] = sources;
+    if (state === STATE.MATCH) matchedCount++;
+    else if (state === STATE.MISMATCH) mismatchedCount++;
+    else unknownCount++;
     const w = FIELD_WEIGHTS[field] || 0;
     totalWeight += w;
     weightedCredit += credit * w;
@@ -274,19 +398,39 @@ function computeMatchScore(dataset, filters) {
     });
     matchDetails.keywords = kwMatched;
     credits.keywords = kwMatched ? 1 : 0;
-    if (kwMatched) matchedCount++;
+    states.keywords = kwMatched ? STATE.MATCH : STATE.UNKNOWN;
+    evidence.keywords = kwMatched ? ['text'] : [];
+    if (kwMatched) matchedCount++; else unknownCount++;
     const w = FIELD_WEIGHTS.keywords || 0;
     totalWeight += w;
-    weightedCredit += (kwMatched ? 1 : 0) * w;
+    weightedCredit += (kwMatched ? 1 : UNKNOWN_CREDIT) * w;
   }
 
-  // Neutral 0.5 when nothing was requested; otherwise graded average + premium.
-  const baseScore  = totalWeight > 0 ? weightedCredit / totalWeight : 0.5;
-  const exactPremium = totalWeight > 0 ? Math.min(EXACT_MATCH_BONUS * matchedCount, MAX_EXACT_PREMIUM) : 0;
-  const score      = totalWeight > 0 ? Math.min(baseScore + exactPremium, 1) : 0.5;
-  const matchRatio = requestedCount > 0 ? matchedCount / requestedCount : 0;
+  // Neutral 0.5 when nothing was requested; otherwise coverage-aware graded average
+  // + exact-match premium − confirmed-mismatch penalty (capped to [0,1]).
+  const baseScore       = totalWeight > 0 ? weightedCredit / totalWeight : 0.5;
+  const matchRatio      = requestedCount > 0 ? matchedCount / requestedCount : 0;
+  const coverageFactor  = requestedCount > 0 ? (0.5 + 0.5 * matchRatio) : 1.0;
+  const coverageBase    = baseScore * coverageFactor;
+  const exactPremium    = totalWeight > 0 ? Math.min(EXACT_MATCH_BONUS * matchedCount, MAX_EXACT_PREMIUM) : 0;
+  const mismatchPenalty = Math.min(MISMATCH_PENALTY_PER_FIELD * mismatchedCount, MAX_MISMATCH_PENALTY);
+  const score           = totalWeight > 0
+    ? Math.max(0, Math.min(coverageBase + exactPremium - mismatchPenalty, 1))
+    : 0.5;
 
-  return { score, matchCount: matchedCount, requestedCount, matchRatio, matchDetails, credits, baseScore };
+  return {
+    score,
+    matchCount: matchedCount,
+    mismatchedCount,
+    unknownCount,
+    requestedCount,
+    matchRatio,
+    matchDetails,
+    credits,
+    states,
+    evidence,
+    baseScore,
+  };
 }
 
 /**
@@ -359,6 +503,10 @@ function computeDiversityBonus(dataset, sourceCounts) {
  * @param {Object[]} discoveryResults
  * @returns {Object[]} merged array with _source annotation
  */
+function normalizeDoi(doi) {
+  return String(doi || '').trim().toLowerCase().replace(/^doi:\s*/i, '');
+}
+
 function deduplicate(mongodbResults, repositoryResults, discoveryResults) {
   // Legacy 2-pool call: deduplicate(mongodbResults, discoveryResults)
   if (discoveryResults === undefined) {
@@ -378,10 +526,16 @@ function deduplicate(mongodbResults, repositoryResults, discoveryResults) {
   for (const [pool, label] of pools) {
     for (const ds of pool || []) {
       const key = `${ds.source}:${ds.source_id}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        merged.push({ ...ds, _source: label });
+      const normDoi = ds.doi ? normalizeDoi(ds.doi) : null;
+      const doiKey = normDoi ? `doi:${normDoi}` : null;
+
+      if (seen.has(key) || (doiKey && seen.has(doiKey))) {
+        continue;
       }
+
+      seen.add(key);
+      if (doiKey) seen.add(doiKey);
+      merged.push({ ...ds, _source: label });
     }
   }
 
@@ -428,10 +582,15 @@ function logRankingDiagnostics(filters, scored) {
         repository:    d.source || '',
         finalScore:    d._rankingScore,
         queryMatch:    d._matchScore,
-        modalityMatch: d._matchDetails && d._matchDetails.modality !== undefined ? d._matchDetails.modality : null,
-        diseaseMatch:  d._matchDetails && d._matchDetails.condition !== undefined ? d._matchDetails.condition : null,
-        taskMatch:     d._matchDetails && d._matchDetails.task !== undefined ? d._matchDetails.task : null,
-        regionMatch:   d._matchDetails && d._matchDetails.region !== undefined ? d._matchDetails.region : null,
+        // Phase 9/11 — three-state concept detail + evidence for dev
+        // explanations ("why did this rank here?"). Production users never
+        // receive these fields; they exist only in this development log.
+        modalityState: d._matchDetails && d._matchDetails.states ? d._matchDetails.states.modality : null,
+        conditionState: d._matchDetails && d._matchDetails.states ? d._matchDetails.states.condition : null,
+        taskState:     d._matchDetails && d._matchDetails.states ? d._matchDetails.states.task : null,
+        ageState:      d._matchDetails && d._matchDetails.states ? d._matchDetails.states.age_range : null,
+        evidence:      d._matchDetails && d._matchDetails.evidence ? d._matchDetails.evidence : {},
+        coverage:      d._matchDetails && d._matchDetails.coverage ? d._matchDetails.coverage : null,
         quality:       d._qualityScore,
         trust:         d._trustScore,
         freshness:     d._freshnessScore,
@@ -508,9 +667,20 @@ function rank(mongodbResults, repositoryResults, discoveryResults, filters) {
       _matchDetails: {
         ...matchResult.matchDetails,
         credits:       matchResult.credits,
+        states:        matchResult.states,
+        evidence:      matchResult.evidence,
         matchCount:    matchResult.matchCount,
+        mismatchedCount: matchResult.mismatchedCount,
+        unknownCount:  matchResult.unknownCount,
         requestedCount: matchResult.requestedCount,
         matchRatio:    matchResult.matchRatio,
+        // Phase 8 — candidate concept coverage, retained for ranking input
+        // and dev diagnostics: { matched, mismatched, unknown }.
+        coverage: {
+          matched:    matchResult.matchCount,
+          mismatched: matchResult.mismatchedCount,
+          unknown:    matchResult.unknownCount,
+        },
       },
     };
   });
@@ -530,4 +700,12 @@ module.exports = {
   computeTrustScore,
   modalityOverlap,
   regionOverlap,
+  MODALITY_SYNONYMS,
+  // Retrieval V2 — shared pure helpers (candidateGenerator imports these;
+  // one-way dependency, no cycle).
+  normalizeTaskLabel,
+  taskOverlap,
+  otherTaskLabelInText,
+  TASK_VOCAB,
+  STATE,
 };

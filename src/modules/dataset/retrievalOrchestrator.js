@@ -24,6 +24,7 @@ const logger                                      = require('../../utils/logger'
 const env                                         = require('../../config/env.config');
 const { parseQuery, runFallbackSearch, runRepositorySearch } = require('../agent/agent.client');
 const { searchMongoDB }                           = require('./dataset.service');
+const { generateCandidates, extractHardConstraints } = require('./candidateGenerator'); // Retrieval V2
 const { catalogSearch }                           = require('./catalogSearch.service'); // Option B hybrid branch
 const { analyzeQueryComplexity }                  = require('./queryComplexityAnalyzer');
 const { computeRetrievalQuality, evaluate, evaluateAfterRepositories } = require('./discoveryPolicy');
@@ -75,6 +76,11 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
     filters = { raw_query: query, modality: [], species: [], condition: [], task: null, format: [] };
   }
 
+  // Retrieval V2 Phase 5: capture HARD constraints from explicit UI filter
+  // selections BEFORE merging — they stay strict at every cascade level.
+  // Natural-language parser concepts remain soft relevance signals.
+  const hardConstraints = extractHardConstraints(explicitFilters);
+
   // Merge explicit UI filters over parser result
   if (explicitFilters && typeof explicitFilters === 'object') {
     const hasExplicit = Object.values(explicitFilters).some(
@@ -113,14 +119,25 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
   const complexity = analyzeQueryComplexity(filters);
 
   // ──────────────────────────────────────────────
-  // Step 3: Local MongoDB Retrieval
+  // Step 3: Local MongoDB Retrieval — Retrieval V2 recall-oriented cascade.
+  // Concepts are SOFT during candidate generation (coverage is retained per
+  // candidate); only explicit UI filters are HARD $and clauses.
   // ──────────────────────────────────────────────
   let mongodbResults = [];
+  let generationInfo = { levelsUsed: [], droppedWeak: 0, coverageDistribution: {} };
   try {
-    mongodbResults = await searchMongoDB(filters);
+    const gen = await generateCandidates(filters, hardConstraints);
+    mongodbResults = gen.candidates;
+    generationInfo = gen;
   } catch (err) {
-    logger.error(`[Orchestrator] MongoDB search failed: ${err.message}`);
-    // Continue — Discovery Agent may salvage results
+    logger.error(`[Orchestrator] Candidate generation failed: ${err.message}`);
+    try {
+      // Degrade to the legacy strict query rather than returning nothing.
+      mongodbResults = await searchMongoDB(filters);
+    } catch (err2) {
+      logger.error(`[Orchestrator] MongoDB search failed: ${err2.message}`);
+      // Continue — Discovery Agent may salvage results
+    }
   }
 
   // ──────────────────────────────────────────────
@@ -213,8 +230,14 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
       try {
         await runFallbackSearch({ query, filters, userId, userEmail });
 
-        // Re-query MongoDB to pick up datasets the agent just wrote
-        const afterResults = await searchMongoDB(filters);
+        // Re-query MongoDB (same V2 cascade) to pick up datasets the agent wrote
+        let afterResults = [];
+        try {
+          const regen = await generateCandidates(filters, hardConstraints);
+          afterResults = regen.candidates;
+        } catch (regenErr) {
+          afterResults = await searchMongoDB(filters);
+        }
 
         // Net-new datasets = those present after web discovery but not before
         // (mongo + repo keys are the baseline)
@@ -271,6 +294,10 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
       qualityScore:     quality.avgMetadataCompleteness,
       discoveryReason:  discoveryDecision.reason,
       signals:          discoveryDecision.signals,
+      // Retrieval V2 telemetry (Phase 17 regression fields):
+      retrievalLevels:       generationInfo.levelsUsed,
+      droppedWeakCandidates: generationInfo.droppedWeak,
+      candidateCoverage:     generationInfo.coverageDistribution,
       latencyMs:        Date.now() - startMs,
     },
   };

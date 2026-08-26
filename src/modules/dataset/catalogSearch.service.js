@@ -55,7 +55,7 @@ const CATALOG_MODALITY_MAP = {
   'functional magnetic resonance imaging': ['fmri', 'mri', 'functional mri'],
   smri:          ['smri', 'mri', 'anat', 't1w', 't2w'],
   'structural mri': ['smri', 'mri', 'anat', 't1w', 't2w'],
-  mri:           ['mri', 'fmri', 'smri', 'anat', 'imaging', 'func', 't1w', 't2w', 'bold', 'sbref', 'dwi', 'dti', 'fmap', 'fieldmap', 'perf'],
+  mri:           ['mri', 'fmri', 'smri', 'anat', 'imaging', 'func', 't1w', 't2w', 'bold', 'sbref', 'dwi', 'dti', 'fmap', 'fieldmap', 'perf', 'functional nuclear magnetic resonance', 'functional nuclear magnetic resonance imaging'],
   eeg:           ['eeg', 'electroencephalography', 'electrophysiology'],
   electroencephalography: ['eeg', 'electroencephalography', 'electrophysiology'],
   ieeg:          ['ieeg', 'intracranial eeg', 'ecog'],
