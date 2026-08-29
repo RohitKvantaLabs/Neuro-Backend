@@ -10,6 +10,7 @@ const { requireOnboardingComplete } = require('../middleware/requireOnboardingCo
 const { listRepositories } = require('../modules/admin/admin.controller');
 
 const announcementRoutes = require('../modules/announcement/announcement.routes');
+const literatureRoutes = require('../modules/literature/literature.routes');
 
 const router = express.Router();
 
@@ -25,6 +26,7 @@ router.get('/repositories', listRepositories);
 
 // §10.2: Dataset search & subroutes handled by datasetRoutes
 router.use('/datasets', datasetRoutes);
+router.use('/literature', literatureRoutes);
 
 router.use('/query-logs', queryLogRoutes);
 // ponytail: /stream SSE route unmounted — replaced by blocking search flow

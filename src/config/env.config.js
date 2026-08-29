@@ -108,6 +108,7 @@ module.exports = {
     useRepositoryLayer: process.env.FF_USE_REPOSITORY_LAYER === 'true',  // NEW (§5.2)
     useWebDiscovery:    process.env.FF_USE_WEB_DISCOVERY !== 'false',    // NEW (§5.2), default true
     useCatalog:         process.env.FF_USE_CATALOG === 'true',           // NEW — hybrid catalog branch (§Option B), default false
+    useLiterature:      process.env.FF_USE_LITERATURE !== 'false',       // NEW — Literature discovery (§LIT) default true
   },
 
   // §5.2 — Repository Retrieval tier (two-tier discovery: repositories first, web second)
