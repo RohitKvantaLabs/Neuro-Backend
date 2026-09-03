@@ -124,12 +124,64 @@ function buildConcepts(filters = {}) {
   return concepts;
 }
 
+// ─── Canonical bucket → Mongo range helpers (M3/M4/M6) ──────────────────────
+
+// M3: Size buckets → byte ranges (matches classifySize in filter-classifications.ts)
+const GB = 1024 ** 3;
+const SIZE_BUCKET_RANGES = {
+  '<10 GB':     { $lt: 10 * GB },
+  '10–100 GB':  { $gte: 10 * GB, $lt: 101 * GB },
+  '100–500 GB': { $gte: 100 * GB, $lt: 501 * GB },
+  '500 GB+':    { $gte: 500 * GB },
+};
+
+// M4: Year buckets → numeric year ranges (matches classifyYear)
+const YEAR_BUCKET_RANGES = {
+  'Before 2020': { lt: 2020, gte: null },
+  '2020–2022':   { gte: 2020, lt: 2023 },
+  '2023–2025':   { gte: 2023, lt: 2026 },
+  '2026+':       { gte: 2026, lt: null },
+};
+
+// M6: Participants buckets → subject_count ranges (matches classifyParticipants)
+const PARTICIPANTS_BUCKET_RANGES = {
+  '1–25':   { $gte: 1,   $lte: 25 },
+  '26–50':  { $gte: 26,  $lte: 50 },
+  '51–100': { $gte: 51,  $lte: 100 },
+  '101+':   { $gte: 101 },
+};
+
+// M2: Modality bucket → raw token families for $or regex matching
+// Mirrors modalityBucketToTokens in filter-classifications.ts
+const MODALITY_BUCKET_TOKENS = {
+  'MRI':   ['mri', 'fmri', 'smri', 'structural mri', 'functional mri',
+             'magnetic resonance imaging', 'functional magnetic resonance imaging',
+             'structural magnetic resonance imaging', 'dti', 'dwi', 'diffusion',
+             't1w', 't2w', 'bold', 'anat', 'func'],
+  'EEG':   ['eeg', 'electroencephalography', 'electroencephalogram', 'electrophysiology',
+             'ecg', 'emg', 'lfp', 'local field potential'],
+  'IEEG':  ['ieeg', 'intracranial eeg', 'intracranial electroencephalography',
+             'ecog', 'electrocorticography', 'seeg', 'stereoelectroencephalography'],
+  'MEG':   ['meg', 'magnetoencephalography'],
+  'fNIRS': ['fnirs', 'nirs', 'near-infrared spectroscopy', 'near infrared spectroscopy'],
+  'PET':   ['pet', 'positron emission tomography'],
+};
+
+// M5: Human token set for species matching
+const HUMAN_SPECIES_TOKENS = [
+  'human', 'humans', 'homo sapiens', 'participant', 'participants',
+  'subject', 'subjects', 'patient', 'patients', 'adult', 'adults',
+  'child', 'children', 'person', 'people',
+];
+
 /**
- * Extract HARD constraints from explicit UI filter selections only
- * (Phase 5). Returns Mongo clauses that apply at EVERY cascade level.
+ * Extract HARD constraints from explicit UI filter selections only (Phase 5 + M2–M6).
  *
- * Mapping follows the existing frontend dimension contract (search-filters.ts
- * ActiveFilters keys) onto dataset fields — same mapping buildMongoQuery uses.
+ * M2: modality bucket → synonym-family $or regex
+ * M3: size bucket → byte range predicate on size_bytes
+ * M4: year bucket → numeric year range across year fields
+ * M5: species bucket → Human ($in tokens) or Animal ($nin human tokens)
+ * M6: participants bucket → subject_count $gte/$lte range
  */
 function extractHardConstraints(explicitFilters) {
   const ef =
@@ -149,29 +201,83 @@ function extractHardConstraints(explicitFilters) {
   };
 
   pushOr(list('repository').map((v) => ({ source: rx(v) })));
-  pushOr(list('modality').map((v) => ({ modality: rx(v) })));
-  pushOr(list('species').map((v) => ({ species: rx(v) })));
+
+  // M2: modality bucket → expand to full synonym set
+  pushOr(
+    list('modality').flatMap((bucket) => {
+      const tokens = MODALITY_BUCKET_TOKENS[bucket];
+      if (tokens) return tokens.map((t) => ({ modality: rx(t) }));
+      return [{ modality: rx(bucket) }]; // Unspecified / unknown passthrough
+    })
+  );
+
+  // M5: species bucket → Human (inclusive) or Animal (exclusive)
+  const speciesValues = list('species');
+  for (const bucket of speciesValues) {
+    const b = bucket.trim().toLowerCase();
+    if (b === 'human') {
+      pushOr(HUMAN_SPECIES_TOKENS.map((t) => ({ species: rx(t) })));
+    } else if (b === 'animal') {
+      // Animal = has a species field that is NOT a human term
+      hard.$and.push({
+        species: { $exists: true, $not: new RegExp(HUMAN_SPECIES_TOKENS.map(escapeRegex).join('|'), 'i') },
+      });
+    }
+    // Unspecified: no constraint
+  }
+
   // Explicit disease stays a strict structured filter (UI semantics preserved).
   pushOr(
-    list('disease').flatMap((v) => [{ disease: rx(v) }, { keywords: rx(v) }])
+    list('disease').flatMap((v) => {
+      if (v.toLowerCase() === 'unspecified') return [{ disease: { $in: [null, '', 'none', 'null', 'nan'] } }];
+      if (v.toLowerCase() === 'others') return []; // "Others" is a frontend-only catch-all
+      return [{ disease: rx(v) }, { keywords: rx(v) }];
+    })
   );
-  // Explicit Age = Child REMAINS a hard filter (Phase 5 requirement).
-  pushOr(
-    list('ageGroup').map((v) => ({ age_group: rx(v) }))
-  );
+
+  pushOr(list('ageGroup').map((v) => ({ age_group: rx(v) })));
   pushOr(list('region').map((v) => ({ region: rx(v) })));
-  pushOr(
-    list('task').flatMap((v) => [{ task: rx(v) }, { keywords: rx(v) }])
-  );
-  pushOr(
-    list('format').flatMap((v) => [{ keywords: rx(v) }])
-  );
-  pushOr(
-    list('availability').map((v) => ({ access_tier: rx(v) }))
-  );
+  pushOr(list('task').flatMap((v) => [{ task: rx(v) }, { keywords: rx(v) }]));
+  pushOr(list('format').flatMap((v) => [{ keywords: rx(v) }]));
+  pushOr(list('availability').map((v) => ({ access_tier: rx(v) })));
+
+  // M3: size bucket → byte range on size_bytes
+  for (const bucket of list('size')) {
+    const range = SIZE_BUCKET_RANGES[bucket];
+    if (range) hard.$and.push({ size_bytes: range });
+  }
+
+  // M4: year bucket → numeric year range across all date fields
+  for (const bucket of list('year')) {
+    const range = YEAR_BUCKET_RANGES[bucket];
+    if (!range) continue;
+    const buildRange = () => {
+      const r = {};
+      if (range.gte != null) r.$gte = range.gte;
+      if (range.lt  != null) r.$lt  = range.lt;
+      return r;
+    };
+    const r = buildRange();
+    if (Object.keys(r).length > 0) {
+      hard.$and.push({
+        $or: [
+          { publication_year: r },
+          { published_at: r },
+          { date_published: r },
+        ],
+      });
+    }
+  }
+
+  // M6: participants bucket → subject_count range
+  for (const bucket of list('participants')) {
+    const range = PARTICIPANTS_BUCKET_RANGES[bucket];
+    if (range) hard.$and.push({ subject_count: range });
+  }
 
   return hard.$and.length > 0 ? hard : null;
 }
+
 
 // ─── Query builders ──────────────────────────────────────────────────────────
 
