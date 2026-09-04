@@ -363,9 +363,11 @@ async function catalogSearch(filters, limit) {
 
 module.exports = {
   catalogSearch,
+  getCatalogModel,
   // Exported for unit tests:
   buildCatalogQuery,
   projectCatalogDoc,
   selectPrimarySource,
   expandModality,
 };
+

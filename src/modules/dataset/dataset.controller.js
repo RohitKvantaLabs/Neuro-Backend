@@ -150,7 +150,7 @@ const search = asyncHandler(async (req, res) => {
   ).send(res);
 });
 
-// GET /datasets/:id — fetch a single dataset by Mongo _id or source_id for the detail page
+// GET /datasets/:id — fetch a single dataset by Mongo _id or source_id for the detail page (with catalog fallback)
 const getById = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const mongoose = require('mongoose');
@@ -161,9 +161,37 @@ const getById = asyncHandler(async (req, res) => {
   if (!dataset) {
     dataset = await Dataset.findOne({ source_id: id }).lean();
   }
-  if (!dataset) throw new ApiError(404, 'Dataset not found.');
-  return new ApiResponse(200, dataset).send(res);
+  if (dataset) {
+    return new ApiResponse(200, dataset).send(res);
+  }
+
+  // Fallback: search neurosearch_dataset_catalog for catalog-only datasets
+  const { getCatalogModel, projectCatalogDoc } = require('./catalogSearch.service');
+  const CatalogDataset = getCatalogModel();
+  let catalogDoc = null;
+
+  if (mongoose.Types.ObjectId.isValid(id)) {
+    catalogDoc = await CatalogDataset.findById(id).lean();
+  }
+  if (!catalogDoc) {
+    catalogDoc = await CatalogDataset.findOne({
+      $or: [
+        { canonicalDatasetId: id },
+        { 'sources.sourceDatasetId': id },
+      ],
+    }).lean();
+  }
+
+  if (catalogDoc) {
+    const mapped = projectCatalogDoc(catalogDoc);
+    if (mapped) {
+      return new ApiResponse(200, mapped).send(res);
+    }
+  }
+
+  throw new ApiError(404, 'Dataset not found.');
 });
+
 
 /**
  * GET /datasets/popular
