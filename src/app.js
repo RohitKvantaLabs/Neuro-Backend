@@ -7,6 +7,7 @@ const mongoSanitize = require('express-mongo-sanitize');
 
 const env = require('./config/env.config');
 const connectDB = require('./config/db.config');
+const requestIdMiddleware = require('./middleware/requestId');
 const requestLogger = require('./middleware/requestLogger');
 const { generalLimiter } = require('./middleware/rateLimiter');
 const notFound = require('./middleware/notFound');
@@ -61,7 +62,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// 4. Logging + rate limiting
+// 4. Request ID + Logging + rate limiting
+app.use(requestIdMiddleware);
 app.use(requestLogger);
 app.use(generalLimiter);
 

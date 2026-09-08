@@ -141,13 +141,13 @@ describe('rank with three pools', () => {
   });
   const filters = { modality: ['fMRI'], species: ['human'], condition: ['ADHD'] };
 
-  it('annotates _source per pool: mongodb → repository → discovery', () => {
+  it('annotates _source per pool: mongodb_dataset → repository → discovery', () => {
     const merged = deduplicate(
       [makeDataset({ source_id: 'a' })],
       [makeDataset({ source_id: 'b' })],
       [makeDataset({ source_id: 'c' })]
     );
-    expect(merged.map((ds) => ds._source)).toEqual(['mongodb', 'repository', 'discovery']);
+    expect(merged.map((ds) => ds._source)).toEqual(['mongodb_dataset', 'repository', 'discovery']);
   });
 
   it('gives Mongo priority over repository over discovery on duplicate keys', () => {
@@ -158,7 +158,7 @@ describe('rank with three pools', () => {
     );
     expect(merged).toHaveLength(1);
     expect(merged[0].title).toBe('Mongo version');
-    expect(merged[0]._source).toBe('mongodb');
+    expect(merged[0]._source).toBe('mongodb_dataset');
   });
 
   it('repository beats discovery on a duplicate key', () => {
@@ -181,7 +181,7 @@ describe('rank with three pools', () => {
     );
     expect(ranked).toHaveLength(3);
     const sources = ranked.map((ds) => ds._source).sort();
-    expect(sources).toEqual(['discovery', 'mongodb', 'repository']); // sorted lexicographically
+    expect(sources).toEqual(['discovery', 'mongodb_dataset', 'repository']); // sorted lexicographically
     expect(ranked.every((ds) => typeof ds._rankingScore === 'number')).toBe(true);
   });
 
@@ -193,7 +193,7 @@ describe('rank with three pools', () => {
       filters
     );
     expect(ranked).toHaveLength(2);
-    expect(ranked.map((ds) => ds._source).sort()).toEqual(['discovery', 'mongodb']);
+    expect(ranked.map((ds) => ds._source).sort()).toEqual(['discovery', 'mongodb_dataset']);
   });
 });
 

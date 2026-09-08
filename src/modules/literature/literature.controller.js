@@ -31,7 +31,7 @@ const searchLiterature = asyncHandler(async (req, res) => {
 
   // Domain guard: if not neuroscience, still allow literature but mark
   // We do not block literature on in_domain false; papers exist beyond neuro
-  const litResult = await orchestrateLiterature(filters);
+  const litResult = await orchestrateLiterature(filters, { requestId: req.requestId || null });
 
   return new ApiResponse(200, {
     query: rawQuery,

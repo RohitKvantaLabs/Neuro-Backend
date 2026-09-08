@@ -491,36 +491,54 @@ function computeDiversityBonus(dataset, sourceCounts) {
 // ---------- Deduplication (§9.5 / §4.5) ----------
 
 /**
- * Merge three pools — MongoDB, repository, web discovery — deduplicating by
- * source:source_id. Priority order is Mongo first, then repository, then web
- * (§4.5), so earlier pools win on ties.
+ * Merge pools — MongoDB dataset, MongoDB catalog, repository, web discovery
+ * — deduplicating by source:source_id. Priority order is dataset first,
+ * then catalog, then repository, then web (§4.5 Phase 2 four-way).
+ * Earlier pools win on ties (preserves winner provenance).
  *
- * Backward-compatible: the legacy 2-pool call deduplicate(mongo, discovery)
- * is still supported (repository pool omitted).
+ * Backward-compatible:
+ *  - legacy 2-pool: deduplicate(mongo, discovery)
+ *  - 3-pool: deduplicate(mongo, repository, discovery)  (mongo = dataset-only legacy)
+ *  - 4-pool: deduplicate(mongoDataset, catalog, repository, discovery)
  *
- * @param {Object[]} mongodbResults
+ * @param {Object[]} mongodbDatasetResults
+ * @param {Object[]} catalogResults
  * @param {Object[]} repositoryResults
  * @param {Object[]} discoveryResults
- * @returns {Object[]} merged array with _source annotation
+ * @returns {Object[]} merged array with _source/_provenance annotation
  */
 function normalizeDoi(doi) {
   return String(doi || '').trim().toLowerCase().replace(/^doi:\s*/i, '');
 }
 
-function deduplicate(mongodbResults, repositoryResults, discoveryResults) {
-  // Legacy 2-pool call: deduplicate(mongodbResults, discoveryResults)
-  if (discoveryResults === undefined) {
-    discoveryResults = repositoryResults;
-    repositoryResults = [];
+function deduplicate(...args) {
+  // Supports 2, 3, 4 pools:
+  //  deduplicate(mongo, discovery)
+  //  deduplicate(mongo, repository, discovery)
+  //  deduplicate(mongoDataset, catalog, repository, discovery)
+  let mongodbDatasetResults = [];
+  let catalogResults = [];
+  let repoResults = [];
+  let webResults = [];
+
+  if (args.length === 2) {
+    [mongodbDatasetResults, webResults] = args;
+  } else if (args.length === 3) {
+    [mongodbDatasetResults, repoResults, webResults] = args;
+  } else if (args.length === 4) {
+    [mongodbDatasetResults, catalogResults, repoResults, webResults] = args;
+  } else if (args.length === 1) {
+    [mongodbDatasetResults] = args;
   }
 
   const seen   = new Set();
   const merged = [];
 
   const pools = [
-    [mongodbResults,    'mongodb'],
-    [repositoryResults, 'repository'],
-    [discoveryResults,  'discovery'],
+    [mongodbDatasetResults, 'mongodb_dataset'],
+    [catalogResults,        'mongodb_catalog'],
+    [repoResults,           'repository'],
+    [webResults,            'discovery'],
   ];
 
   for (const [pool, label] of pools) {
@@ -535,7 +553,11 @@ function deduplicate(mongodbResults, repositoryResults, discoveryResults) {
 
       seen.add(key);
       if (doiKey) seen.add(doiKey);
-      merged.push({ ...ds, _source: label });
+      const provenance = ds._provenance || ds._source || label;
+      let normalized = provenance;
+      if (provenance === 'mongodb') normalized = 'mongodb_dataset';
+      if (provenance === 'catalog') normalized = 'mongodb_catalog';
+      merged.push({ ...ds, _source: ds._source && ds._source !== 'mongodb' && ds._source !== 'catalog' ? ds._source : normalized, _provenance: normalized });
     }
   }
 
@@ -607,27 +629,51 @@ function logRankingDiagnostics(filters, scored) {
 /**
  * Merge, deduplicate, score, sort, and return top 30 results.
  *
- * §4.5: rank now accepts THREE pools (Mongo first, then repository, then web).
+ * Phase 2 four-way: rank now accepts FOUR pools
+ *   mongodbDataset → mongodb_dataset
+ *   catalog        → mongodb_catalog
+ *   repository     → repository
+ *   discovery      → discovery
  * Weights/formula unchanged from §9.3.
  *
- * Backward-compatible: the legacy 3-arg call rank(mongo, discovery, filters)
- * is still supported (repository pool omitted).
+ * Backward-compatible:
+ *  - legacy 3-arg: rank(mongo, discovery, filters)
+ *  - 3-pool: rank(mongo, repository, discovery, filters)  (mongo = dataset)
+ *  - 4-pool: rank(mongoDataset, catalog, repository, discovery, filters)
  *
- * @param {Object[]} mongodbResults    - from MongoDB search before discovery
- * @param {Object[]} repositoryResults - repository tier results (§4.2)
- * @param {Object[]} discoveryResults  - net-new results after web discovery ran
- * @param {Object}   filters           - QueryFilters from parseQuery
- * @returns {Object[]} ranked datasets with _rankingScore, _source, _matchDetails
+ * @param {Object[]} mongodbDatasetResults
+ * @param {Object[]} catalogResults
+ * @param {Object[]} repositoryResults
+ * @param {Object[]} discoveryResults
+ * @param {Object}   filters
+ * @returns {Object[]} ranked datasets with _rankingScore, _source/_provenance, _matchDetails
  */
-function rank(mongodbResults, repositoryResults, discoveryResults, filters) {
-  // Legacy 3-arg call: rank(mongodbResults, discoveryResults, filters)
-  if (!Array.isArray(discoveryResults)) {
-    filters = discoveryResults;
-    discoveryResults = repositoryResults;
-    repositoryResults = [];
+function rank(...args) {
+  // Last arg is always filters; remaining args are pools.
+  //  rank(mongo, filters)                              → 1 pool
+  //  rank(mongo, discovery, filters)                   → 2 pools
+  //  rank(mongo, repository, discovery, filters)       → 3 pools
+  //  rank(mongoDataset, catalog, repository, discovery, filters) → 4 pools
+  if (args.length < 2) return [];
+  const realFilters = args[args.length - 1];
+  const pools = args.slice(0, -1);
+
+  let mongodbDatasetResults = [];
+  let catalogResults = [];
+  let repoResults = [];
+  let webResults = [];
+
+  if (pools.length === 1) {
+    [mongodbDatasetResults] = pools;
+  } else if (pools.length === 2) {
+    [mongodbDatasetResults, webResults] = pools;
+  } else if (pools.length === 3) {
+    [mongodbDatasetResults, repoResults, webResults] = pools;
+  } else if (pools.length >= 4) {
+    [mongodbDatasetResults, catalogResults, repoResults, webResults] = pools;
   }
 
-  const merged = deduplicate(mongodbResults, repositoryResults, discoveryResults);
+  const merged = deduplicate(mongodbDatasetResults, catalogResults, repoResults, webResults);
   if (merged.length === 0) return [];
 
   const weights = getWeights();
@@ -640,7 +686,7 @@ function rank(mongodbResults, repositoryResults, discoveryResults, filters) {
   }
 
   const scored = merged.map((dataset) => {
-    const matchResult    = computeMatchScore(dataset, filters);
+    const matchResult    = computeMatchScore(dataset, realFilters);
     const qualityScore   = computeQualityScore(dataset);
     const freshnessScore = computeFreshnessScore(dataset);
     const trustScore     = computeTrustScore(dataset);
@@ -687,7 +733,7 @@ function rank(mongodbResults, repositoryResults, discoveryResults, filters) {
 
   // Deterministic sort: score DESC, then the stable tie-breaker chain.
   scored.sort(compareRanked);
-  logRankingDiagnostics(filters, scored);
+  logRankingDiagnostics(realFilters, scored);
   return scored.slice(0, 30);
 }
 

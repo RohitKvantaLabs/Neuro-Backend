@@ -314,8 +314,10 @@ function projectCatalogDoc(doc) {
     // Direct-link flag
     is_direct_link: (primary && primary.isDirectLink) || false,
 
-    // Catalog provenance (internal, _ prefixed, not in API contract)
-    _source:      'catalog',
+    // Catalog provenance — Phase 2 four-way: mongodb_catalog
+    // Do not infer from repository ownership; retrieval source is how we obtained it.
+    _source:      'mongodb_catalog',
+    _provenance:  'mongodb_catalog',
     _canonicalId: doc.canonicalDatasetId || null,
     _sourceKeys:  Array.isArray(doc.sourceKeys) ? doc.sourceKeys : [],
     _catalogDoi:  doc.doi || null,

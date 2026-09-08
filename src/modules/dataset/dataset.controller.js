@@ -59,19 +59,36 @@ const search = asyncHandler(async (req, res) => {
   }
 
   // ── Feature flag: new Retrieval Orchestrator (§18.5) ──────────────────────
+  const requestId = req.requestId || null;
+  const controllerStart = Date.now();
   if (env.featureFlags?.useNewOrchestrator) {
     const orchestratorResult = await orchestrateSearch(
       effectiveQuery || 'neuroscience datasets',
       hasExplicitFilters ? explicitFilters : null,
-      { userId: req.user?.id, userEmail }
+      { userId: req.user?.id, userEmail },
+      requestId
     );
 
+    // Phase 2 four-way provenance: count final ranked results by provenance for telemetry
+    const provenanceCounts = { mongodb_dataset: 0, mongodb_catalog: 0, repository: 0, discovery: 0 };
+    for (const r of orchestratorResult.results || []) {
+      const prov = r._provenance || r._source || 'unknown';
+      if (prov === 'mongodb_dataset' || prov === 'mongodb') provenanceCounts.mongodb_dataset++;
+      else if (prov === 'mongodb_catalog' || prov === 'catalog') provenanceCounts.mongodb_catalog++;
+      else if (prov === 'repository') provenanceCounts.repository++;
+      else if (prov === 'discovery') provenanceCounts.discovery++;
+    }
+    // Phase 7 — persist wall-clock stage timings (passive, never blocks search)
+    const stageTimings = orchestratorResult.timings || null;
     await QueryLog.create({
+      requestId,
       userId:       req.user?.id || null,
       rawQuery:     rawQuery,
       filters:      orchestratorResult.filters,
       resultSource: orchestratorResult.source,
       resultCount:  orchestratorResult.metrics.totalFound,
+      provenance:   provenanceCounts,
+      timings:      stageTimings,
     }).catch((err) => logger.warn(`QueryLog write failed: ${err.message}`));
 
     return new ApiResponse(
@@ -80,6 +97,7 @@ const search = asyncHandler(async (req, res) => {
         source:  orchestratorResult.source,
         results: orchestratorResult.results,
         metrics: orchestratorResult.metrics,
+        timings: stageTimings,
         // v0.3 §9.2 (additive): expose the effective (merged) parsed filters so
         // the UI can auto-select parser-derived filters (FR-8) and detect
         // filter/query conflicts (FR-7). Search behavior is unchanged.
@@ -91,10 +109,11 @@ const search = asyncHandler(async (req, res) => {
     ).send(res);
   }
 
-  // ── Legacy path (unchanged) ───────────────────────────────────────────────
+  // ── Legacy path (unchanged, timings best-effort total only) ──────────────
   let filters;
+  const legacyParseStart = Date.now();
   try {
-    filters = await parseQuery(effectiveQuery || 'neuroscience datasets', req.user?.id, userEmail);
+    filters = await parseQuery(effectiveQuery || 'neuroscience datasets', req.user?.id, userEmail, requestId);
   } catch (err) {
     logger.warn(`Dataset search parser fallback triggered for query="${effectiveQuery}": ${err.message}`);
     filters = { raw_query: effectiveQuery };
@@ -108,13 +127,17 @@ const search = asyncHandler(async (req, res) => {
   const cachedResults = await searchDatasets(filters);
 
   if (cachedResults.length > 0) {
+    const legacyTimings = { totalMs: Date.now() - controllerStart, parseMs: Date.now() - legacyParseStart, datasetMs: 0, catalogMs: null, repositoryMs: null, discoveryMs: null, rankingMs: null };
     await QueryLog.create({
+      requestId,
       userId: req.user?.id || null,
       rawQuery: query,
       filters,
       resultSource: 'cache',
       resultCount: cachedResults.length,
-    });
+      provenance: { mongodb_dataset: cachedResults.length, mongodb_catalog: 0, repository: 0, discovery: 0 },
+      timings: legacyTimings,
+    }).catch(()=>{});
     // v0.3 §9.2 (additive): expose effective filters (FR-8/FR-7).
     return new ApiResponse(200, { source: 'cache', results: cachedResults, filters }, 'Results found.').send(res);
   }
@@ -127,6 +150,7 @@ const search = asyncHandler(async (req, res) => {
       filters,
       userId: req.user?.id,
       userEmail,
+      requestId,
     });
     fallbackDatasets = Array.isArray(agentResult?.datasets) ? agentResult.datasets : [];
   } catch (err) {
@@ -134,13 +158,17 @@ const search = asyncHandler(async (req, res) => {
     throw new ApiError(502, 'Dataset fallback search could not be completed. Please try again.');
   }
 
+  const legacyFallbackTimings = { totalMs: Date.now() - controllerStart, parseMs: Date.now() - legacyParseStart, datasetMs: null, catalogMs: null, repositoryMs: null, discoveryMs: null, rankingMs: null };
   await QueryLog.create({
+    requestId,
     userId: req.user?.id || null,
     rawQuery: query,
     filters,
     resultSource: 'fallback',
     resultCount: fallbackDatasets.length,
-  });
+    provenance: { mongodb_dataset: 0, mongodb_catalog: 0, repository: 0, discovery: fallbackDatasets.length },
+    timings: legacyFallbackTimings,
+  }).catch(()=>{});
 
   return new ApiResponse(
     200,

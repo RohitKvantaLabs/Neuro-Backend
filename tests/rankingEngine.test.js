@@ -373,12 +373,12 @@ describe('deduplicate', () => {
     const merged = deduplicate([mongodbDs], [discoveryDs]);
     expect(merged).toHaveLength(1);
     expect(merged[0].title).toBe('MongoDB version');
-    expect(merged[0]._source).toBe('mongodb');
+    expect(merged[0]._source).toBe('mongodb_dataset');
   });
 
   it('annotates _source on every merged dataset', () => {
     const merged = deduplicate([makeDataset({ source_id: 'ds001' })], [makeDataset({ source_id: 'ds002' })]);
-    expect(merged.map((ds) => ds._source)).toEqual(['mongodb', 'discovery']);
+    expect(merged.map((ds) => ds._source)).toEqual(['mongodb_dataset', 'discovery']);
   });
 });
 
@@ -410,7 +410,7 @@ describe('rank', () => {
   it('adds _rankingScore, _source, and _matchDetails to each result', () => {
     const [result] = rank([makeDataset({ source_id: 'ds001' })], [], fullFilters);
     expect(typeof result._rankingScore).toBe('number');
-    expect(result._source).toBe('mongodb');
+    expect(result._source).toBe('mongodb_dataset');
     expect(result._matchDetails).toBeDefined();
     expect(result._matchDetails.matchCount).toBeGreaterThan(0);
     expect(result._matchDetails.matchRatio).toBeGreaterThan(0);

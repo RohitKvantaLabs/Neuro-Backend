@@ -12,6 +12,27 @@ const { TtlCache } = require('../../utils/ttlCache');
 const literatureCache = new TtlCache({ ttlMs: 5 * 60 * 1000 });
 
 /**
+ * Fire-and-forget ExternalApiLog helper — observational only, never breaks literature path.
+ * Uses existing ExternalApiLog model (Phase 5) with service `openalex`/`tavily` and operation `literature_search`.
+ */
+function logLiteratureExternal(requestId, service, operation, endpoint, durationMs, status, httpStatus, error) {
+  try {
+    const ExternalApiLog = require('../admin/externalApiLog.model');
+    ExternalApiLog.create({
+      requestId: requestId || null,
+      queryId: null,
+      service: String(service),
+      operation: String(operation),
+      endpoint: endpoint ? String(endpoint) : null,
+      durationMs: typeof durationMs === 'number' ? Math.round(durationMs) : 0,
+      status: status === 'error' ? 'error' : 'success',
+      httpStatus: typeof httpStatus === 'number' ? httpStatus : null,
+      error: error ? String(error).slice(0, 500) : null,
+    }).catch(() => {});
+  } catch { /* never break literature */ }
+}
+
+/**
  * Literature lane orchestration — independent from dataset lane.
  * Parallel execution: datasetOrchestrator and literatureOrchestrator can be awaited together.
  */
@@ -28,16 +49,28 @@ async function orchestrateLiterature(filters, options = {}) {
   const limit = options.limit || 10;
   const providers = options.providers || [new OpenAlexProvider(), new TavilyLiteratureProvider()];
 
-  // Parallel provider calls, isolated failures
+  // Parallel provider calls, isolated failures — with ExternalApiLog telemetry (Phase 12, observational)
+  const requestId = options.requestId || null;
   const rawByProvider = await Promise.all(
     providers.map(async (p) => {
+      const provStart = Date.now();
+      const isOpenAlex = p.name.toLowerCase().includes('openalex');
+      const service = isOpenAlex ? 'openalex' : 'tavily';
+      const operation = 'literature_search';
+      const endpoint = isOpenAlex ? 'works' : 'search';
       try {
         const raw = await Promise.race([
           p.search(literatureQuery, { limit }),
           new Promise((_, reject) => setTimeout(() => reject(new Error('literature provider timeout 8s')), 8000)),
         ]);
+        const dur = Date.now() - provStart;
+        logLiteratureExternal(requestId, service, operation, endpoint, dur, 'success', 200, null);
         return { provider: p.name, raw: Array.isArray(raw) ? raw : [], error: null };
       } catch (err) {
+        const dur = Date.now() - provStart;
+        const httpStatus = err.response?.status ?? (err.status ?? null);
+        const isTimeout = err.message && err.message.includes('timeout');
+        logLiteratureExternal(requestId, service, operation, endpoint, dur, 'error', typeof httpStatus === 'number' ? httpStatus : (isTimeout ? null : null), err.message);
         logger.warn(`[Literature] provider ${p.name} failed: ${err.message}`);
         return { provider: p.name, raw: [], error: err.message };
       }

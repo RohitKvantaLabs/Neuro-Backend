@@ -371,6 +371,8 @@ async function generateCandidates(filters, hardConstraints, options = {}) {
       }
       pool.set(key, {
         ...doc,
+        _source: doc._source || 'mongodb_dataset',
+        _provenance: doc._provenance || 'mongodb_dataset',
         _retrievalLevel: level,
         _coverage: coverage,
       });

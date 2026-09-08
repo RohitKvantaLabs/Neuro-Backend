@@ -61,19 +61,33 @@ function extractNetNew(afterResults, originalKeys) {
  * @param {Object} userContext      - { userId, userEmail }
  * @returns {Promise<OrchestratorResult>} - { source, results, metrics }
  */
-async function orchestrateSearch(query, explicitFilters, userContext = {}) {
+async function orchestrateSearch(query, explicitFilters, userContext = {}, requestId = null) {
   const startMs = Date.now();
   const { userId, userEmail = 'anonymous' } = userContext;
+  const effectiveRequestId = requestId || userContext.requestId || null;
+  // Phase 7 — stage wall-clock timings (null = skipped, 0+ = executed)
+  const timings = {
+    totalMs: null,
+    parseMs: null,
+    datasetMs: null,
+    catalogMs: null,
+    repositoryMs: null,
+    discoveryMs: null,
+    rankingMs: null,
+  };
 
   // ──────────────────────────────────────────────
   // Step 1: Parse Query
   // ──────────────────────────────────────────────
   let filters;
+  const parseStart = Date.now();
   try {
-    filters = await parseQuery(query, userId, userEmail);
+    filters = await parseQuery(query, userId, userEmail, effectiveRequestId);
   } catch (err) {
     logger.warn(`[Orchestrator] parseQuery failed: ${err.message} — using raw fallback`);
     filters = { raw_query: query, modality: [], species: [], condition: [], task: null, format: [] };
+  } finally {
+    timings.parseMs = Date.now() - parseStart;
   }
 
   // Retrieval V2 Phase 5: capture HARD constraints from explicit UI filter
@@ -99,16 +113,18 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
   // ──────────────────────────────────────────────
   if (filters.in_domain === false) {
     logger.info(`[Orchestrator] OUT_OF_DOMAIN — query rejected before retrieval: "${query}"`);
+    timings.totalMs = Date.now() - startMs;
     return {
       source: 'out_of_domain',
       results: [],
       filters,
+      timings,
       metrics: {
         totalFound: 0, fromMongoDB: 0, fromCatalog: 0,
         fromRepository: 0, fromDiscovery: 0,
         queryComplexity: 'none', qualityScore: 0,
         discoveryReason: 'Query rejected as out-of-domain before retrieval.',
-        signals: [], latencyMs: Date.now() - startMs,
+        signals: [], latencyMs: timings.totalMs,
       },
     };
   }
@@ -125,6 +141,7 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
   // ──────────────────────────────────────────────
   let mongodbResults = [];
   let generationInfo = { levelsUsed: [], droppedWeak: 0, coverageDistribution: {} };
+  const datasetStart = Date.now();
   try {
     const gen = await generateCandidates(filters, hardConstraints);
     mongodbResults = gen.candidates;
@@ -138,6 +155,8 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
       logger.error(`[Orchestrator] MongoDB search failed: ${err2.message}`);
       // Continue — Discovery Agent may salvage results
     }
+  } finally {
+    timings.datasetMs = Date.now() - datasetStart;
   }
 
   // ──────────────────────────────────────────────
@@ -147,6 +166,7 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
   // ──────────────────────────────────────────────
   let catalogResults = [];
   if (env.featureFlags?.useCatalog) {
+    const catalogStart = Date.now();
     try {
       catalogResults = await catalogSearch(filters);
       logger.info(`[Orchestrator] Catalog branch — ${catalogResults.length} candidates`);
@@ -154,7 +174,11 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
       // Catalog failure: degrade gracefully, existing datasets results remain.
       logger.warn(`[Orchestrator] Catalog search failed: ${err.message} — continuing without catalog`);
       catalogResults = [];
+    } finally {
+      timings.catalogMs = Date.now() - catalogStart;
     }
+  } else {
+    timings.catalogMs = null;
   }
 
   // ──────────────────────────────────────────────
@@ -162,10 +186,12 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
   // When FF_USE_CATALOG=true the combined local pool (catalog+datasets) is
   // evaluated. DiscoveryPolicy.computeRetrievalQuality() is pool-agnostic
   // (it reads any array of dataset-shaped docs) — no policy code changes.
-  // When FF_USE_CATALOG=false, localPool === mongodbResults (flag-off parity).
+  // When FF_USE_CATALOG=false, combinedLocal === mongodbResults (flag-off parity).
+  // Phase 2: keep dataset and catalog separate for provenance; combinedLocal used only for quality.
   // ──────────────────────────────────────────────
-  const localPool = catalogResults.length > 0 ? [...mongodbResults, ...catalogResults] : mongodbResults;
-  const quality = computeRetrievalQuality(localPool, filters, complexity);
+  const combinedLocal = catalogResults.length > 0 ? [...mongodbResults, ...catalogResults] : mongodbResults;
+  const localPool = combinedLocal; // alias for legacy consumers (quality/discovery baseline)
+  const quality = computeRetrievalQuality(combinedLocal, filters, complexity);
 
   // ──────────────────────────────────────────────
   // Step 5: Discovery Policy Evaluation
@@ -199,20 +225,25 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
   if (discoveryDecision.shouldDiscover) {
     // Tier 1: repository search (§4.4) — gated by FF_USE_REPOSITORY_LAYER.
     if (env.featureFlags?.useRepositoryLayer && typeof runRepositorySearch === 'function') {
+      const repoStart = Date.now();
       try {
-        const repoRes = await runRepositorySearch({ query, filters, userId, userEmail });
+        const repoRes = await runRepositorySearch({ query, filters, userId, userEmail, requestId: effectiveRequestId });
         repositoryResults = Array.isArray(repoRes?.datasets) ? repoRes.datasets : [];
         logger.info(`[Orchestrator] Repository tier complete — ${repositoryResults.length} datasets`);
       } catch (err) {
         // §7.5: repo failure → degrade to web tier
         logger.warn(`[Orchestrator] Repository search failed: ${err.message} — skipping repo tier`);
         repositoryResults = [];
+      } finally {
+        timings.repositoryMs = Date.now() - repoStart;
       }
+    } else {
+      timings.repositoryMs = null;
     }
 
     // Tier 2: web discovery only if repositories didn't satisfy quality (§4.4).
-    // localPool already contains catalog+datasets; include repo results for re-evaluation.
-    const combined = [...localPool, ...repositoryResults];
+    // combinedLocal already contains catalog+datasets; include repo results for re-evaluation.
+    const combined = [...combinedLocal, ...repositoryResults];
     const postRepoQuality = computeRetrievalQuality(combined, filters, complexity);
     let webDecision;
     try {
@@ -227,8 +258,9 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
     }
 
     if (webDecision.shouldDiscoverWeb) {
+      const discStart = Date.now();
       try {
-        await runFallbackSearch({ query, filters, userId, userEmail });
+        await runFallbackSearch({ query, filters, userId, userEmail, requestId: effectiveRequestId });
 
         // Re-query MongoDB (same V2 cascade) to pick up datasets the agent wrote
         let afterResults = [];
@@ -248,28 +280,37 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
         // §7.5: Web discovery failure → return Mongo+repo results only, log error
         logger.error(`[Orchestrator] Web discovery failed: ${err.message} — falling back to Mongo+repo results only`);
         discoveryDecision = { ...discoveryDecision, shouldDiscover: false, reason: 'discovery_error' };
+      } finally {
+        timings.discoveryMs = Date.now() - discStart;
       }
+    } else {
+      timings.discoveryMs = null;
     }
+  } else {
+    timings.repositoryMs = null;
+    timings.discoveryMs = null;
   }
 
   // ──────────────────────────────────────────────
-  // Step 7: Layer 3 — Merge (3 pools) + Rank (§4.5)
-  // When FF_USE_CATALOG=true: catalog results are combined with mongodbResults
-  // as the first pool argument so datasets docs win on identical source:source_id
-  // (datasets pool appears first in [...mongodbResults, ...catalogResults]).
-  // rankingEngine.js rank()/deduplicate() are NOT modified.
-  // When FF_USE_CATALOG=false: localPool === mongodbResults (identical behavior).
+  // Step 7: Layer 3 — Merge (4 pools) + Rank (§4.5 Phase 2 four-way)
+  // Provenance: mongodb_dataset > mongodb_catalog > repository > discovery
+  // rankingEngine deduplicate preserves winner provenance.
   // ──────────────────────────────────────────────
   let rankedResults;
+  const rankStart = Date.now();
   try {
-    rankedResults = rank(localPool, repositoryResults, discoveryResults, filters);
+    rankedResults = rank(mongodbResults, catalogResults, repositoryResults, discoveryResults, filters);
   } catch (err) {
-    // §7.5: Ranking failure → return unranked merged results
+    // §7.5: Ranking failure → return unranked merged results with provenance
     logger.error(`[Orchestrator] Layer 3 ranking failed: ${err.message} — returning unranked`);
     rankedResults = [
-      ...localPool.map((ds) => ({ ...ds, _source: ds._source || 'mongodb' })),
-      ...discoveryResults.map((ds) => ({ ...ds, _source: 'discovery' })),
+      ...mongodbResults.map((ds) => ({ ...ds, _source: ds._source || 'mongodb_dataset', _provenance: ds._provenance || 'mongodb_dataset' })),
+      ...catalogResults.map((ds) => ({ ...ds, _source: ds._source || 'mongodb_catalog', _provenance: ds._provenance || 'mongodb_catalog' })),
+      ...repositoryResults.map((ds) => ({ ...ds, _source: 'repository', _provenance: 'repository' })),
+      ...discoveryResults.map((ds) => ({ ...ds, _source: 'discovery', _provenance: 'discovery' })),
     ];
+  } finally {
+    timings.rankingMs = Date.now() - rankStart;
   }
 
   // ──────────────────────────────────────────────
@@ -280,10 +321,13 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
     ? 'merged'
     : 'cache';
 
+  timings.totalMs = Date.now() - startMs;
+
   return {
     source,
     results: rankedResults,
     filters, // expose parsed filters for QueryLog
+    timings,
     metrics: {
       totalFound:       rankedResults.length,
       fromMongoDB:      mongodbResults.length,
@@ -298,7 +342,7 @@ async function orchestrateSearch(query, explicitFilters, userContext = {}) {
       retrievalLevels:       generationInfo.levelsUsed,
       droppedWeakCandidates: generationInfo.droppedWeak,
       candidateCoverage:     generationInfo.coverageDistribution,
-      latencyMs:        Date.now() - startMs,
+      latencyMs:        timings.totalMs,
     },
   };
 }

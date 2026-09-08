@@ -85,6 +85,12 @@ router.get('/analytics', getAnalytics);
 router.get('/dashboard', getDashboard);
 router.get('/audit-log', getAuditLog);
 
+// Phase 8 — Search Observability (additive)
+const { listSearches, getSearchDetail, listExternalLogs } = require('./adminObservability.controller');
+router.get('/searches', listSearches);
+router.get('/searches/:requestId', getSearchDetail);
+router.get('/external-logs', listExternalLogs);
+
 // Infrastructure (§11.9)
 router.get('/infra/mongo', getInfraMongo);
 router.get('/infra/redis', getInfraRedis);
@@ -93,6 +99,25 @@ router.get('/infra/storage', getInfraStorage);
 // Token usage & Agent activity
 router.get('/tokens', getTokens);
 router.get('/agents', getAgents);
+
+// Cost Intelligence — Phase 6/11
+const {
+  getCostByRequestId,
+  getDailyCost,
+  getMonthlyCost,
+  getCostSummary,
+  getPricing,
+  getCostBreakdown,
+  getCostScaling,
+} = require('./cost.controller');
+
+router.get('/cost/pricing', getPricing);
+router.get('/cost/request/:requestId', getCostByRequestId);
+router.get('/cost/breakdown', getCostBreakdown);
+router.get('/cost/scaling', getCostScaling);
+router.get('/cost/daily', getDailyCost);
+router.get('/cost/monthly', getMonthlyCost);
+router.get('/cost/summary', getCostSummary);
 
 // Help Desk — Tickets
 router.get('/tickets', listTickets);

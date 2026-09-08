@@ -632,9 +632,80 @@ const getAnalytics = asyncHandler(async (req, res) => {
     topFailedQuery: topFailedQuery[0] ? topFailedQuery[0].query : null,
   };
 
+  // ── Phase 8 additive: QueryLog timings (total/parse/dataset/catalog/repository/discovery/ranking) ─
+  // Uses same 60-day window and _percentile helper; empty datasets handled cleanly.
+  let queryLogTimings=null, provenanceSummary=null, costOverview=null;
+  try{
+    const timingsAgg = await QueryLog.aggregate([
+      { $match: { createdAt: { $gte: since }, timings: { $ne: null } } },
+      { $group: {
+        _id: null,
+        count: { $sum: 1 },
+        totalVals: { $push: '$timings.totalMs' },
+        parseVals: { $push: '$timings.parseMs' },
+        datasetVals: { $push: '$timings.datasetMs' },
+        catalogVals: { $push: '$timings.catalogMs' },
+        repoVals: { $push: '$timings.repositoryMs' },
+        discVals: { $push: '$timings.discoveryMs' },
+        rankVals: { $push: '$timings.rankingMs' },
+        avgTotal: { $avg: '$timings.totalMs' },
+        avgParse: { $avg: '$timings.parseMs' },
+        avgDataset: { $avg: '$timings.datasetMs' },
+        avgCatalog: { $avg: '$timings.catalogMs' },
+        avgRepo: { $avg: '$timings.repositoryMs' },
+        avgDisc: { $avg: '$timings.discoveryMs' },
+        avgRank: { $avg: '$timings.rankingMs' },
+      }}
+    ]);
+    if(timingsAgg[0]){
+      const t=timingsAgg[0];
+      const clean = (arr)=> (arr||[]).filter(v=> typeof v==='number' && Number.isFinite(v)).sort((a,b)=>a-b);
+      const mk = (vals, avg)=> {
+        const c=clean(vals);
+        if(c.length===0) return { count:0, avgMs:null, medianMs:null, p95Ms:null, minMs:null, maxMs:null };
+        return { count:c.length, avgMs: avg!=null? Math.round(avg*10)/10:null, medianMs:_percentile(c,50), p95Ms:_percentile(c,95), minMs:c[0], maxMs:c[c.length-1] };
+      };
+      queryLogTimings={
+        total: mk(t.totalVals, t.avgTotal),
+        parse: mk(t.parseVals, t.avgParse),
+        dataset: mk(t.datasetVals, t.avgDataset),
+        catalog: mk(t.catalogVals, t.avgCatalog),
+        repository: mk(t.repoVals, t.avgRepo),
+        discovery: mk(t.discVals, t.avgDisc),
+        ranking: mk(t.rankVals, t.avgRank),
+        sampleCount: t.count,
+      };
+    } else {
+      queryLogTimings={ total:{count:0}, sampleCount:0 };
+    }
+
+    const provAgg = await QueryLog.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      { $group: {
+        _id: null,
+        total: { $sum: 1 },
+        mongodb_dataset: { $sum: { $ifNull: ['$provenance.mongodb_dataset',0] } },
+        mongodb_catalog: { $sum: { $ifNull: ['$provenance.mongodb_catalog',0] } },
+        repository: { $sum: { $ifNull: ['$provenance.repository',0] } },
+        discovery: { $sum: { $ifNull: ['$provenance.discovery',0] } },
+        outOfDomain: { $sum: { $cond:[{$eq:['$resultSource','out_of_domain']},1,0] } },
+      }}
+    ]);
+    provenanceSummary = provAgg[0] || { total:0, mongodb_dataset:0, mongodb_catalog:0, repository:0, discovery:0, outOfDomain:0 };
+
+    // Cost overview for same window (reuse Phase 6 service, fail-safe)
+    try{
+      const { calculateAggregateCost } = require('../../services/cost.service');
+      const costAgg = await calculateAggregateCost({ from: since.toISOString(), to: new Date().toISOString(), groupBy:'day' });
+      costOverview = costAgg.summary;
+    }catch{ costOverview=null; }
+  }catch{ /* fail-safe: analytics must not break on telemetry */ }
+
   return new ApiResponse(200, {
     series, users, saved, collections, cacheHitRate, mergedCount,
     repositories, searchPerformance: { daily, overall, stages }, searchOutcomes,
+    // Phase 8 additive fields (preserve existing contract)
+    queryLogTimings, provenanceSummary, costOverview,
   }).send(res);
 });
 
@@ -917,25 +988,87 @@ const getInfraStorage = asyncHandler(async (req, res) => {
 });
 
 // ─── Infrastructure — Token Usage ─────────────────────────────────────────────
+// Phase 6 additive: each record now includes a calculated `cost` field (USD) derived
+// from the centralized pricing table. Existing fields are unchanged.
+// Phase 8 additive: supports ?requestId=&provider=&model=&agent=&usageType=&status=&from=&to=&limit=&offset=
+// Preserves backward compat: when no pagination params, returns array (frontend expects array).
 
 const getTokens = asyncHandler(async (req, res) => {
   const TokenUsage = require('./tokenUsage.model');
-  const tokens = await TokenUsage.find()
-    .sort({ createdAt: -1 })
-    .limit(5000)
-    .lean();
-  return new ApiResponse(200, tokens).send(res);
+  const { calculateLlmCostForRecord } = require('../../services/cost.service');
+  const { requestId, provider, model, agent, usageType, status, from, to, limit: rawLimit, offset: rawOffset } = req.query;
+  const hasFilter = !!(requestId || provider || model || agent || usageType || status || from || to || rawLimit || rawOffset);
+  const filter={};
+  if(requestId) filter.requestId=String(requestId);
+  if(provider) filter.provider=String(provider);
+  if(model) filter.model=String(model);
+  if(agent) filter.agent=String(agent);
+  if(usageType){
+    if(!['actual','estimated'].includes(usageType)) throw new ApiError(400,'usageType must be actual or estimated');
+    filter.usageType=usageType;
+  }
+  if(status){
+    if(!['success','error'].includes(status)) throw new ApiError(400,'status must be success or error');
+    filter.status=status;
+  }
+  if(from || to){
+    filter.createdAt={};
+    if(from){ const d=new Date(from); if(isNaN(d)) throw new ApiError(400,'Invalid from date'); filter.createdAt.$gte=d; }
+    if(to){ const d=new Date(to); if(isNaN(d)) throw new ApiError(400,'Invalid to date'); filter.createdAt.$lte=d; }
+  }
+  // Backward compat: no filter → original behavior (5000 array)
+  if(!hasFilter){
+    const tokens = await TokenUsage.find().sort({ createdAt: -1 }).limit(5000).lean();
+    const enriched = tokens.map((t) => {
+      const c = calculateLlmCostForRecord(t);
+      return { ...t, cost: { totalCost: c.totalCost, inputCost: c.inputCost, outputCost: c.outputCost, isEstimated: c.isEstimated, costAvailable: c.costAvailable, pricingAvailable: c.pricingAvailable, reason: c.reason, currency: c.currency || 'USD' } };
+    });
+    return new ApiResponse(200, enriched).send(res);
+  }
+  const limit = Math.min(Math.max(parseInt(rawLimit,10)||50,1),500);
+  const offset = Math.max(parseInt(rawOffset,10)||0,0);
+  const [tokens, total] = await Promise.all([
+    TokenUsage.find(filter).sort({createdAt:-1}).skip(offset).limit(limit).lean(),
+    TokenUsage.countDocuments(filter),
+  ]);
+  const enriched = tokens.map((t) => {
+    const c = calculateLlmCostForRecord(t);
+    return { ...t, cost: { totalCost: c.totalCost, inputCost: c.inputCost, outputCost: c.outputCost, isEstimated: c.isEstimated, costAvailable: c.costAvailable, pricingAvailable: c.pricingAvailable, reason: c.reason, currency: c.currency || 'USD' } };
+  });
+  return new ApiResponse(200, { items: enriched, total, limit, offset }).send(res);
 });
 
 // ─── Infrastructure — Agent Activity ──────────────────────────────────────────
+// Phase 8 additive: supports ?requestId=&agent=&provider=&status=&from=&to=&limit=&offset=
 
 const getAgents = asyncHandler(async (req, res) => {
   const AgentLog = require('./agentLog.model');
-  const logs = await AgentLog.find()
-    .sort({ createdAt: -1 })
-    .limit(500)
-    .lean();
-  return new ApiResponse(200, logs).send(res);
+  const { requestId, agent, provider, status, from, to, limit: rawLimit, offset: rawOffset } = req.query;
+  const hasFilter = !!(requestId || agent || provider || status || from || to || rawLimit || rawOffset);
+  if(!hasFilter){
+    const logs = await AgentLog.find().sort({ createdAt: -1 }).limit(500).lean();
+    return new ApiResponse(200, logs).send(res);
+  }
+  const filter={};
+  if(requestId) filter.requestId=String(requestId);
+  if(agent) filter.agent=String(agent);
+  if(provider) filter.provider=String(provider);
+  if(status){
+    if(!['success','error'].includes(status)) throw new ApiError(400,'status must be success or error');
+    filter.status=status;
+  }
+  if(from || to){
+    filter.createdAt={};
+    if(from){ const d=new Date(from); if(isNaN(d)) throw new ApiError(400,'Invalid from date'); filter.createdAt.$gte=d; }
+    if(to){ const d=new Date(to); if(isNaN(d)) throw new ApiError(400,'Invalid to date'); filter.createdAt.$lte=d; }
+  }
+  const limit = Math.min(Math.max(parseInt(rawLimit,10)||50,1),500);
+  const offset = Math.max(parseInt(rawOffset,10)||0,0);
+  const [logs, total] = await Promise.all([
+    AgentLog.find(filter).sort({createdAt:-1}).skip(offset).limit(limit).lean(),
+    AgentLog.countDocuments(filter),
+  ]);
+  return new ApiResponse(200, { items: logs, total, limit, offset }).send(res);
 });
 
 // ─── Help Desk — Tickets ─────────────────────────────────────────────────────

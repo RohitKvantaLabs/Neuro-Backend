@@ -319,9 +319,9 @@ describe('projectCatalogDoc', () => {
     expect(result.trust_tier).toBeNull();
   });
 
-  it('sets _source to "catalog"', () => {
+  it('sets _source to "mongodb_catalog"', () => {
     const result = projectCatalogDoc(makeCatalogDoc());
-    expect(result._source).toBe('catalog');
+    expect(result._source).toBe('mongodb_catalog');
   });
 
   it('preserves _canonicalId from canonicalDatasetId', () => {
@@ -341,8 +341,9 @@ describe('projectCatalogDoc', () => {
     expect(result).toHaveProperty('source');
     expect(result).toHaveProperty('source_id');
     // Internal fields are _ prefixed — they don't appear in existing datasets docs
+    // Phase 2: _source is mongodb_catalog and _provenance mirrors it
     expect(Object.keys(result).filter((k) => k.startsWith('_'))).toEqual(
-      expect.arrayContaining(['_source', '_canonicalId', '_sourceKeys', '_catalogDoi', '_matchedVia'])
+      expect.arrayContaining(['_source', '_provenance', '_canonicalId', '_sourceKeys', '_catalogDoi', '_matchedVia'])
     );
   });
 
@@ -399,7 +400,7 @@ describe('catalogSearch', () => {
     expect(result).toHaveLength(1);
     expect(result[0].source).toBe('openneuro');
     expect(result[0].source_id).toBe('ds000117');
-    expect(result[0]._source).toBe('catalog');
+    expect(result[0]._source).toBe('mongodb_catalog');
   });
 
   it('drops malformed docs (missing source) and returns the rest', async () => {
